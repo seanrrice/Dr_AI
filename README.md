@@ -4,7 +4,7 @@ An AI-powered smart patient examination room built with modern web technologies 
 
 ---
 
-## 🚀 HOW TO RUN LOCALLY
+## HOW TO RUN LOCALLY
 
 ### STEP 1: OPEN TERMINAL
 Open **Terminal (Mac/Linux)** or **Command Prompt (Windows)** and navigate to the project folder:
@@ -47,7 +47,7 @@ npm run dev
 ```
 
 Once started, the app should automatically open in your browser at:  
-👉 [http://localhost:5173](http://localhost:5173)
+[http://localhost:5173](http://localhost:5173)
 
 ---
 
@@ -65,7 +65,7 @@ Once started, the app should automatically open in your browser at:
 
 ---
 
-## 🧩 TERMINAL COMMANDS SUMMARY
+## TERMINAL COMMANDS SUMMARY
 
 ```bash
 cd smart-exam-room
@@ -77,5 +77,5 @@ npm run dev
 
 ---
 
-## 🩺 Project Overview
+## Project Overview
 This project enables a **smart examination room** experience using AI for real-time data analysis, patient interaction enhancement, and multimodal input integration.
