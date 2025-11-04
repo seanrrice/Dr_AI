@@ -61,7 +61,7 @@ export const analyzeSentiment = (text) => {
   const lowerText = text.toLowerCase();
   
   // Simple sentiment indicators
-  const negativeWords = ['pain', 'hurt', 'severe', 'terrible', 'awful', 'can\'t', 'unable', 'difficult', 'worse', 'bad'];
+  const negativeWords = ['pain', 'hurt', 'severe', 'terrible', 'awful', 'can\'t', 'unable', 'difficult', 'worse', 'bad', 'throbbing'];
   const positiveWords = ['better', 'improved', 'good', 'fine', 'well', 'easy', 'comfortable'];
   const distressWords = ['severe', 'extreme', 'terrible', 'unbearable', 'constant', 'always'];
   
@@ -224,7 +224,7 @@ Respond in JSON format:
   return JSON.parse(data.response);
 };
 
-// Compare all AI models
+// Compare all AI models (note to add a third one for more comparison)
 export const compareAllModels = async (transcription, onProgress) => {
   const results = {
     openai: null,
@@ -289,7 +289,7 @@ export const getConsensusResult = (results, transcription) => {
     return null; // All models failed
   }
   
-  // Use first successful model as base (i prefer OpenAI)
+  // Use first successful model as base (note to add a 3rd one)
   const baseModel = successfulModels.includes('openai') ? 'openai' : 'ollama';
   const baseResult = results[baseModel].diagnostic;
   
