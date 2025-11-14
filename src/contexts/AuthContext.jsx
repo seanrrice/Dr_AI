@@ -5,6 +5,11 @@ const AuthContext = createContext(null);
 // Hardcoded users
 const USERS = [
   { username: 'victoria', password: 'password1234', fullName: 'Dr. Victoria' },
+  { username: 'lelli', password: 'password1234', fullName: 'Dr. Lelli' },
+  { username: 'carson', password: 'password1234', fullName: 'Dr. Carson' },
+  { username: 'sean', password: 'password1234', fullName: 'Dr. Sean' },
+  { username: 'avyesh', password: 'password1234', fullName: 'Dr. Avyesh' },
+  { username: 'dani', password: 'password1234', fullName: 'Dr. Dani' },
   { username: 'admin', password: 'admin123', fullName: 'Dr. Admin' }
 ];
 
