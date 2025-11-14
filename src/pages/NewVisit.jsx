@@ -83,51 +83,51 @@ export default function NewVisit() {
     createPatientMutation.mutate(newPatient);
   };
 
- const analyzeTranscription = async () => {
-  if (!visitData.transcription || !selectedPatientId) return;
+  const analyzeTranscription = async () => {
+    if (!visitData.transcription || !selectedPatientId) return;
 
-  setIsAnalyzing(true);
-  setAnalysisProgress({ openai: 'running', ollama: 'running' });
+    setIsAnalyzing(true);
+    setAnalysisProgress({ openai: 'running', ollama: 'running' });
 
-  try {
-    // Run multi-model analysis (OpenAI + Ollama only)
-    const results = await compareAllModels(visitData.transcription, (model, status) => {
-      console.log(`${model}: ${status}`);
-      setAnalysisProgress(prev => ({ ...prev, [model]: status }));
-    });
+    try {
+      // Run multi-model analysis (OpenAI + Ollama only)
+      const results = await compareAllModels(visitData.transcription, (model, status) => {
+        console.log(`${model}: ${status}`);
+        setAnalysisProgress(prev => ({ ...prev, [model]: status }));
+      });
 
-    // Get consensus result from successful models 
-    const consensusData = getConsensusResult(results, visitData.transcription);
+      // Get consensus result from successful models 
+      const consensus = await getConsensusResult(results, visitData.transcription);
 
-    if (!consensusData) {
-      alert("All AI models failed. Please check your configuration and try again.");
+      if (!consensus) {  // ✅ FIXED: Changed from consensusData to consensus
+        alert("All AI models failed. Please check your configuration and try again.");
+        setIsAnalyzing(false);
+        return;
+      }
+
+      // Create visit with all analysis data
+      const visitNumber = existingVisits.length + 1;
+      
+      createVisitMutation.mutate({
+        patient_id: selectedPatientId,
+        visit_number: visitNumber,
+        ...visitData,
+        // Store consensus results 
+        keyword_analysis: consensus.keyword_analysis,      // ✅ FIXED
+        sentiment_analysis: consensus.sentiment_analysis,  // ✅ FIXED
+        semantic_analysis: consensus.semantic_analysis,    // ✅ FIXED
+        ai_assessment: consensus.ai_assessment,            // ✅ FIXED
+        // Store all model results for comparison 
+        ai_comparison: results
+      });
+
+    } catch (error) {
+      console.error("Analysis error:", error);
+      alert("Error analyzing transcription. Please try again.");
+    } finally {
       setIsAnalyzing(false);
-      return;
     }
-
-    // Create visit with all analysis data
-    const visitNumber = existingVisits.length + 1;
-    
-    createVisitMutation.mutate({
-      patient_id: selectedPatientId,
-      visit_number: visitNumber,
-      ...visitData,
-      // Store consensus results 
-      keyword_analysis: consensusData.keyword_analysis,
-      sentiment_analysis: consensusData.sentiment_analysis,
-      semantic_analysis: consensusData.semantic_analysis,
-      ai_assessment: consensusData.ai_assessment,
-      // Store all model results for comparison 
-      ai_comparison: results
-    });
-
-  } catch (error) {
-    console.error("Analysis error:", error);
-    alert("Error analyzing transcription. Please try again.");
-  } finally {
-    setIsAnalyzing(false);
-  }
-};
+  };
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-teal-50 via-green-50 to-emerald-50 p-8">
