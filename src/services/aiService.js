@@ -17,7 +17,7 @@ async function initializeSentimentClassifier() {
   }
   
   isInitializing = true;
-  console.log('Loading Transformers.js sentiment model (one-time, ~10 seconds)...');
+  console.log('🤖 Loading Transformers.js sentiment model (one-time, ~10 seconds)...');
   
   initializationPromise = (async () => {
     try {
@@ -355,18 +355,70 @@ export const analyzeSemantics = (text) => {
 
 
 // OpenAI API call
-const callOpenAI = async (transcription) => {
+const callOpenAI = async (visitData) => {
   if (!OPENAI_API_KEY) {
     throw new Error('OpenAI API key not configured');
   }
   
-  const prompt = `You are a medical AI assistant. Analyze this patient transcription and provide:
+  // Build comprehensive clinical context
+  let clinicalContext = '';
+  
+  // Extract transcription (handle both string and object)
+  const transcription = typeof visitData === 'string' ? visitData : visitData.transcription;
+  
+  // Add vitals if present and visitData is an object
+  if (typeof visitData === 'object') {
+    if (visitData.bp_systolic || visitData.heart_rate) {
+      clinicalContext += '\n\nVital Signs:';
+      if (visitData.bp_systolic && visitData.bp_diastolic) {
+        clinicalContext += `\n- Blood Pressure: ${visitData.bp_systolic}/${visitData.bp_diastolic} mmHg`;
+      }
+      if (visitData.heart_rate) {
+        clinicalContext += `\n- Heart Rate: ${visitData.heart_rate} bpm`;
+      }
+      if (visitData.respiratory_rate) {
+        clinicalContext += `\n- Respiratory Rate: ${visitData.respiratory_rate} /min`;
+      }
+      if (visitData.temperature) {
+        clinicalContext += `\n- Temperature: ${visitData.temperature}°`;
+      }
+      if (visitData.spo2) {
+        clinicalContext += `\n- SpO2: ${visitData.spo2}%`;
+      }
+    }
+    
+    // Add physical measurements if present
+    if (visitData.height || visitData.weight) {
+      clinicalContext += '\n\nPhysical Measurements:';
+      if (visitData.height) {
+        clinicalContext += `\n- Height: ${visitData.height} cm`;
+      }
+      if (visitData.weight) {
+        clinicalContext += `\n- Weight: ${visitData.weight} kg`;
+      }
+      if (visitData.bmi) {
+        clinicalContext += `\n- BMI: ${visitData.bmi}`;
+      }
+    }
+    
+    // Add physician notes if present
+    if (visitData.physician_notes && visitData.physician_notes.trim()) {
+      clinicalContext += `\n\nPhysician's Clinical Observations:\n${visitData.physician_notes}`;
+    }
+  }
+  
+  const prompt = `You are a medical AI assistant. Analyze this patient information and provide:
 1. Suggested diagnoses (up to 3)
 2. Recommended diagnostic tests (up to 5)
 3. Treatment suggestions (up to 5)
 4. Follow-up recommendations
 
-Patient transcription: "${transcription}"
+${typeof visitData === 'object' && visitData.chief_complaint ? `Patient's Chief Complaint: ${visitData.chief_complaint}` : ''}
+
+Patient Transcription (Patient's Description):
+"${transcription}"${clinicalContext}
+
+Consider ALL the above clinical information including symptoms, vital signs, measurements, and physician observations when making your assessment.
 
 Respond in JSON format:
 {
@@ -405,14 +457,66 @@ Respond in JSON format:
 };
 
 // Ollama API call
-const callOllama = async (transcription) => {
-  const prompt = `You are a medical AI assistant. Analyze this patient transcription and provide:
+const callOllama = async (visitData) => {
+  // Build comprehensive clinical context
+  let clinicalContext = '';
+  
+  // Extract transcription (handle both string and object)
+  const transcription = typeof visitData === 'string' ? visitData : visitData.transcription;
+  
+  // Add vitals if present and visitData is an object
+  if (typeof visitData === 'object') {
+    if (visitData.bp_systolic || visitData.heart_rate) {
+      clinicalContext += '\n\nVital Signs:';
+      if (visitData.bp_systolic && visitData.bp_diastolic) {
+        clinicalContext += `\n- Blood Pressure: ${visitData.bp_systolic}/${visitData.bp_diastolic} mmHg`;
+      }
+      if (visitData.heart_rate) {
+        clinicalContext += `\n- Heart Rate: ${visitData.heart_rate} bpm`;
+      }
+      if (visitData.respiratory_rate) {
+        clinicalContext += `\n- Respiratory Rate: ${visitData.respiratory_rate} /min`;
+      }
+      if (visitData.temperature) {
+        clinicalContext += `\n- Temperature: ${visitData.temperature}°`;
+      }
+      if (visitData.spo2) {
+        clinicalContext += `\n- SpO2: ${visitData.spo2}%`;
+      }
+    }
+    
+    // Add physical measurements if present
+    if (visitData.height || visitData.weight) {
+      clinicalContext += '\n\nPhysical Measurements:';
+      if (visitData.height) {
+        clinicalContext += `\n- Height: ${visitData.height} cm`;
+      }
+      if (visitData.weight) {
+        clinicalContext += `\n- Weight: ${visitData.weight} kg`;
+      }
+      if (visitData.bmi) {
+        clinicalContext += `\n- BMI: ${visitData.bmi}`;
+      }
+    }
+    
+    // Add physician notes if present
+    if (visitData.physician_notes && visitData.physician_notes.trim()) {
+      clinicalContext += `\n\nPhysician's Clinical Observations:\n${visitData.physician_notes}`;
+    }
+  }
+  
+  const prompt = `You are a medical AI assistant. Analyze this patient information and provide:
 1. Suggested diagnoses (up to 3)
 2. Recommended diagnostic tests (up to 5)
 3. Treatment suggestions (up to 5)
 4. Follow-up recommendations
 
-Patient transcription: "${transcription}"
+${typeof visitData === 'object' && visitData.chief_complaint ? `Patient's Chief Complaint: ${visitData.chief_complaint}` : ''}
+
+Patient Transcription (Patient's Description):
+"${transcription}"${clinicalContext}
+
+Consider ALL the above clinical information including symptoms, vital signs, measurements, and physician observations when making your assessment.
 
 Respond in JSON format:
 {
@@ -445,7 +549,7 @@ Respond in JSON format:
 
 
 
-export const compareAllModels = async (transcription, onProgress) => {
+export const compareAllModels = async (visitData, onProgress) => {
   const results = {
     openai: null,
     ollama: null,
@@ -455,7 +559,7 @@ export const compareAllModels = async (transcription, onProgress) => {
   // Try OpenAI
   try {
     if (onProgress) onProgress('openai', 'running');
-    const diagnostic = await callOpenAI(transcription);
+    const diagnostic = await callOpenAI(visitData);
     results.openai = { diagnostic };
     if (onProgress) onProgress('openai', 'complete');
   } catch (error) {
@@ -467,7 +571,7 @@ export const compareAllModels = async (transcription, onProgress) => {
   // Try Ollama
   try {
     if (onProgress) onProgress('ollama', 'running');
-    const diagnostic = await callOllama(transcription);
+    const diagnostic = await callOllama(visitData);
     results.ollama = { diagnostic };
     if (onProgress) onProgress('ollama', 'complete');
   } catch (error) {

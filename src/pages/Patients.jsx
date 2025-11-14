@@ -8,13 +8,14 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
-import { Plus, Search, TrendingUp, User } from "lucide-react";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+import { Plus, Search, TrendingUp, User, Trash2 } from "lucide-react";
 import { format, differenceInYears } from "date-fns";
 
 export default function Patients() {
   const [searchQuery, setSearchQuery] = useState("");
   const [showAddDialog, setShowAddDialog] = useState(false);
+  const [deleteConfirmDialog, setDeleteConfirmDialog] = useState({ open: false, patient: null });
   const [newPatient, setNewPatient] = useState({
     first_name: "",
     last_name: "",
@@ -54,8 +55,31 @@ export default function Patients() {
     },
   });
 
+  const deletePatientMutation = useMutation({
+    mutationFn: async (patientId) => {
+      // First, delete all visits associated with this patient
+      const patientVisits = visits.filter(v => v.patient_id === patientId);
+      await Promise.all(
+        patientVisits.map(visit => api.entities.Visit.delete(visit.id))
+      );
+      // Then delete the patient
+      return api.entities.Patient.delete(patientId);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries(['patients']);
+      queryClient.invalidateQueries(['visits']);
+      setDeleteConfirmDialog({ open: false, patient: null });
+    },
+  });
+
   const handleCreatePatient = () => {
     createPatientMutation.mutate(newPatient);
+  };
+
+  const handleDeletePatient = () => {
+    if (deleteConfirmDialog.patient) {
+      deletePatientMutation.mutate(deleteConfirmDialog.patient.id);
+    }
   };
 
   const calculateAge = (dob) => {
@@ -209,49 +233,92 @@ export default function Patients() {
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {filteredPatients.map((patient) => (
-                  <Link
-                    key={patient.id}
-                    to={createPageUrl(`PatientAnalysis?id=${patient.id}`)}
-                    className="block"
-                  >
-                    <div className="p-5 border border-slate-200 rounded-lg hover:bg-slate-50 hover:border-blue-300 hover:shadow-md transition-all">
-                      <div className="flex items-start justify-between mb-3">
-                        <div className="flex items-center gap-3">
-                          <div className="w-12 h-12 bg-gradient-to-br from-blue-400 to-blue-600 rounded-full flex items-center justify-center text-white font-bold text-lg">
-                            {patient.first_name[0]}{patient.last_name[0]}
-                          </div>
-                          <div>
-                            <h3 className="font-bold text-slate-900">
-                              {patient.first_name} {patient.last_name}
-                            </h3>
-                            <p className="text-sm text-slate-500">
-                              Age {calculateAge(patient.date_of_birth)}
-                            </p>
+                  <div key={patient.id} className="relative group">
+                    <Link
+                      to={createPageUrl(`PatientAnalysis?id=${patient.id}`)}
+                      className="block"
+                    >
+                      <div className="p-5 border border-slate-200 rounded-lg hover:bg-slate-50 hover:border-blue-300 hover:shadow-md transition-all">
+                        <div className="flex items-start justify-between mb-3">
+                          <div className="flex items-center gap-3">
+                            <div className="w-12 h-12 bg-gradient-to-br from-blue-400 to-blue-600 rounded-full flex items-center justify-center text-white font-bold text-lg">
+                              {patient.first_name[0]}{patient.last_name[0]}
+                            </div>
+                            <div>
+                              <h3 className="font-bold text-slate-900">
+                                {patient.first_name} {patient.last_name}
+                              </h3>
+                              <p className="text-sm text-slate-500">
+                                Age {calculateAge(patient.date_of_birth)}
+                              </p>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                      {patient.medical_record_number && (
-                        <p className="text-xs text-slate-500 mb-2">MRN: {patient.medical_record_number}</p>
-                      )}
-                      {patient.primary_diagnosis && (
-                        <p className="text-sm text-slate-700 mb-3">{patient.primary_diagnosis}</p>
-                      )}
-                      <div className="flex items-center justify-between pt-3 border-t border-slate-200">
-                        <div className="flex items-center gap-2 text-sm text-slate-600">
-                          <TrendingUp className="w-4 h-4" />
-                          <span>{getPatientVisitCount(patient.id)} visits</span>
+                        {patient.medical_record_number && (
+                          <p className="text-xs text-slate-500 mb-2">MRN: {patient.medical_record_number}</p>
+                        )}
+                        {patient.primary_diagnosis && (
+                          <p className="text-sm text-slate-700 mb-3">{patient.primary_diagnosis}</p>
+                        )}
+                        <div className="flex items-center justify-between pt-3 border-t border-slate-200">
+                          <div className="flex items-center gap-2 text-sm text-slate-600">
+                            <TrendingUp className="w-4 h-4" />
+                            <span>{getPatientVisitCount(patient.id)} visits</span>
+                          </div>
+                          <span className="text-xs text-slate-400">
+                            Added {format(new Date(patient.created_date), 'MMM d, yyyy')}
+                          </span>
                         </div>
-                        <span className="text-xs text-slate-400">
-                          Added {format(new Date(patient.created_date), 'MMM d, yyyy')}
-                        </span>
                       </div>
-                    </div>
-                  </Link>
+                    </Link>
+                    {/* Delete Button */}
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      className="absolute top-2 right-2 opacity-0 group-hover:opacity-100 transition-opacity z-10"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setDeleteConfirmDialog({ open: true, patient });
+                      }}
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </Button>
+                  </div>
                 ))}
               </div>
             )}
           </CardContent>
         </Card>
+
+        {/* Delete Confirmation Dialog */}
+        <Dialog open={deleteConfirmDialog.open} onOpenChange={(open) => setDeleteConfirmDialog({ open, patient: null })}>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Delete Patient</DialogTitle>
+              <DialogDescription>
+                Are you sure you want to delete {deleteConfirmDialog.patient?.first_name} {deleteConfirmDialog.patient?.last_name}?
+                This will permanently delete the patient and all associated visit records ({getPatientVisitCount(deleteConfirmDialog.patient?.id || '')} visits).
+                This action cannot be undone.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button 
+                variant="outline" 
+                onClick={() => setDeleteConfirmDialog({ open: false, patient: null })}
+              >
+                Cancel
+              </Button>
+              <Button 
+                variant="destructive" 
+                onClick={handleDeletePatient}
+                disabled={deletePatientMutation.isPending}
+              >
+                {deletePatientMutation.isPending ? 'Deleting...' : 'Delete Patient'}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
     </div>
   );

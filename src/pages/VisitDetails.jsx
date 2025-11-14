@@ -258,6 +258,93 @@ export default function VisitDetails() {
           <div className="grid lg:grid-cols-3 gap-6">
             {/* Main Content */}
             <div className="lg:col-span-2 space-y-6">
+              {/* Vital Signs & Physical Measurements */}
+              {(visit.bp_systolic || visit.height || visit.weight) && (
+                <Card className="bg-white border-none shadow-lg">
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <Activity className="w-5 h-5" />
+                      Vital Signs & Measurements
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="grid md:grid-cols-2 gap-4">
+                      {/* Vital Signs */}
+                      {visit.bp_systolic && (
+                        <div className="space-y-2">
+                          <h4 className="font-semibold text-slate-700 text-sm mb-3">Vital Signs</h4>
+                          <div className="space-y-2">
+                            <div className="flex justify-between items-center p-2 bg-gray-50 rounded">
+                              <span className="text-sm text-gray-600">Blood Pressure</span>
+                              <span className="font-semibold">{visit.bp_systolic}/{visit.bp_diastolic} mmHg</span>
+                            </div>
+                            <div className="flex justify-between items-center p-2 bg-gray-50 rounded">
+                              <span className="text-sm text-gray-600">Heart Rate</span>
+                              <span className="font-semibold">{visit.heart_rate} bpm</span>
+                            </div>
+                            {visit.respiratory_rate && (
+                              <div className="flex justify-between items-center p-2 bg-gray-50 rounded">
+                                <span className="text-sm text-gray-600">Respiratory Rate</span>
+                                <span className="font-semibold">{visit.respiratory_rate} /min</span>
+                              </div>
+                            )}
+                            {visit.temperature && (
+                              <div className="flex justify-between items-center p-2 bg-gray-50 rounded">
+                                <span className="text-sm text-gray-600">Temperature</span>
+                                <span className="font-semibold">{visit.temperature}°</span>
+                              </div>
+                            )}
+                            {visit.spo2 && (
+                              <div className="flex justify-between items-center p-2 bg-gray-50 rounded">
+                                <span className="text-sm text-gray-600">SpO₂</span>
+                                <span className="font-semibold">{visit.spo2}%</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Physical Measurements */}
+                      {(visit.height || visit.weight) && (
+                        <div className="space-y-2">
+                          <h4 className="font-semibold text-slate-700 text-sm mb-3">Physical Measurements</h4>
+                          <div className="space-y-2">
+                            {visit.height && (
+                              <div className="flex justify-between items-center p-2 bg-gray-50 rounded">
+                                <span className="text-sm text-gray-600">Height</span>
+                                <span className="font-semibold">{visit.height} cm</span>
+                              </div>
+                            )}
+                            {visit.weight && (
+                              <div className="flex justify-between items-center p-2 bg-gray-50 rounded">
+                                <span className="text-sm text-gray-600">Weight</span>
+                                <span className="font-semibold">{visit.weight} kg</span>
+                              </div>
+                            )}
+                            {visit.bmi && (
+                              <div className="flex justify-between items-center p-2 bg-teal-50 rounded border border-teal-200">
+                                <span className="text-sm text-teal-900 font-semibold">BMI</span>
+                                <span className="font-bold text-teal-900">{visit.bmi}</span>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Physician Notes */}
+                    {visit.physician_notes && (
+                      <div className="mt-4 pt-4 border-t border-gray-200">
+                        <h4 className="font-semibold text-slate-700 text-sm mb-2">Clinical Observations</h4>
+                        <p className="text-sm text-gray-700 bg-amber-50 p-3 rounded border border-amber-200">
+                          {visit.physician_notes}
+                        </p>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              )}
+
               {/* Transcription */}
               <Card className="bg-white border-none shadow-lg">
                 <CardHeader>
