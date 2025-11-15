@@ -1,0 +1,24 @@
+# Virtual environments
+venv/
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Editor/IDE
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs, runtime files
+transcript_log.txt
+*.log
+
+# Python build
+build/
+dist/
+*.egg-info/
