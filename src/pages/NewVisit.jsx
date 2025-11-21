@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { api } from "@/api/apiClient";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
@@ -10,8 +10,9 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { ArrowLeft, FileText, Brain, Loader2, UserPlus, CheckCircle, XCircle, Clock, Activity } from "lucide-react";
+import { ArrowLeft, FileText, Brain, Loader2, UserPlus, CheckCircle, XCircle, Clock, Activity, Mic, MicOff } from "lucide-react";
 import { compareAllModels, getConsensusResult } from "@/services/aiService";
+import { transcriptionService } from "@/services/transcriptionService";
 
 export default function NewVisit() {
   const navigate = useNavigate();
@@ -41,7 +42,10 @@ export default function NewVisit() {
     openai: 'pending',
     ollama: 'pending'
   });
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [transcriptionError, setTranscriptionError] = useState(null);
   const [showNewPatientDialog, setShowNewPatientDialog] = useState(false);
+  const transcriptionListenerRef = useRef(null);
   const [newPatient, setNewPatient] = useState({
     first_name: "",
     last_name: "",
@@ -62,6 +66,50 @@ export default function NewVisit() {
     queryFn: () => api.entities.Visit.filter({ patient_id: selectedPatientId }),
     enabled: !!selectedPatientId
   });
+
+  // Cleanup transcription on unmount
+  useEffect(() => {
+    return () => {
+      if (isTranscribing) {
+        transcriptionService.stop().catch(console.error);
+      }
+      if (transcriptionListenerRef.current) {
+        transcriptionListenerRef.current();
+      }
+      transcriptionService.disconnect();
+    };
+  }, []);
+
+  // Handle transcription updates
+  useEffect(() => {
+    if (isTranscribing) {
+      transcriptionListenerRef.current = transcriptionService.addListener((event, data) => {
+        if (event === 'update') {
+          // Append new transcription text with newline (includes timestamps and speaker labels)
+          setVisitData(prev => ({
+            ...prev,
+            transcription: prev.transcription 
+              ? `${prev.transcription}\n${data.text}`.trim()
+              : data.text
+          }));
+        } else if (event === 'complete') {
+          // Final transcript received (already formatted with newlines)
+          setVisitData(prev => ({
+            ...prev,
+            transcription: data.full_text || prev.transcription
+          }));
+          setIsTranscribing(false);
+        }
+      });
+    }
+
+    return () => {
+      if (transcriptionListenerRef.current) {
+        transcriptionListenerRef.current();
+        transcriptionListenerRef.current = null;
+      }
+    };
+  }, [isTranscribing]);
 
   const createPatientMutation = useMutation({
     mutationFn: (patientData) => api.entities.Patient.create(patientData),
@@ -93,6 +141,37 @@ export default function NewVisit() {
   });
   const handleCreatePatient = () => {
     createPatientMutation.mutate(newPatient);
+  };
+
+  const handleStartTranscription = async () => {
+    try {
+      setTranscriptionError(null);
+      // Don't set UI state to "transcribing" until the server confirms the session started.
+      await transcriptionService.start();
+      setIsTranscribing(true);
+    } catch (error) {
+      console.error('Failed to start transcription:', error);
+      setTranscriptionError(error.message || 'Failed to start transcription. Make sure the transcription server is running.');
+      setIsTranscribing(false);
+    }
+  };
+
+  const handleStopTranscription = async () => {
+    try {
+      const result = await transcriptionService.stop();
+      if (result && result.full_text) {
+        setVisitData(prev => ({
+          ...prev,
+          transcription: result.full_text
+        }));
+      }
+      setIsTranscribing(false);
+      setTranscriptionError(null);
+    } catch (error) {
+      console.error('Failed to stop transcription:', error);
+      setTranscriptionError(error.message || 'Failed to stop transcription');
+      setIsTranscribing(false);
+    }
   };
 
   const analyzeTranscription = async () => {
@@ -460,10 +539,48 @@ export default function NewVisit() {
           <CardContent className="space-y-5">
             {/* Transcription */}
             <div className="space-y-2">
-              <Label htmlFor="transcription" className="text-sm font-medium text-teal-900">Patient Transcription *</Label>
+              <div className="flex items-center justify-between">
+                <Label htmlFor="transcription" className="text-sm font-medium text-teal-900">Patient Transcription *</Label>
+                <div className="flex items-center gap-2">
+                  {!isTranscribing ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={handleStartTranscription}
+                      className="flex items-center gap-2 border-teal-200 hover:bg-teal-50"
+                    >
+                      <Mic className="w-4 h-4" />
+                      Start Recording
+                    </Button>
+                  ) : (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={handleStopTranscription}
+                      className="flex items-center gap-2 border-red-200 hover:bg-red-50 text-red-700"
+                    >
+                      <MicOff className="w-4 h-4" />
+                      Stop Recording
+                    </Button>
+                  )}
+                </div>
+              </div>
+              {isTranscribing && (
+                <div className="flex items-center gap-2 text-xs text-blue-600">
+                  <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
+                  <span>Recording... Speak clearly into your microphone</span>
+                </div>
+              )}
+              {transcriptionError && (
+                <div className="text-xs text-red-600 bg-red-50 p-2 rounded">
+                  ⚠️ {transcriptionError}
+                </div>
+              )}
               <Textarea
                 id="transcription"
-                placeholder="Type patient's spoken words here..."
+                placeholder="Type patient's spoken words here or use the microphone button to record..."
                 value={visitData.transcription}
                 onChange={(e) => setVisitData({...visitData, transcription: e.target.value})}
                 className="min-h-[180px] font-mono text-sm"
