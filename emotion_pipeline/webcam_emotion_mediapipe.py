@@ -45,7 +45,7 @@ model.load_state_dict(state_dict)
 model.to(DEVICE)
 model.eval()
 
-class_names = ['angry', 'disgust', 'fear', 'happy', 'sad', 'surprise', 'neutral']
+class_names = ['angry', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'suprise']
 
 print("[INFO] Model loaded and ready.")
 
@@ -141,14 +141,14 @@ def main():
                     cv2.putText(frame, text, (x_min, y_min - 10), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
             
-            #FPS calculation
-            curr_time = time.time()
-            fps = 1.0 / (curr_time - prev_time)
-            prev_time = curr_time
+            # #FPS calculation
+            # curr_time = time.time()
+            # fps = 1.0 / (curr_time - prev_time)
+            # prev_time = curr_time
 
-            cv2.putText(frame, f"FPS: {fps:.1f}", (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, 
-                        (0, 255, 0), 2)
+            # cv2.putText(frame, f"FPS: {fps:.1f}", (10, 30),
+            #             cv2.FONT_HERSHEY_SIMPLEX, 0.7, 
+            #             (0, 255, 0), 2)
             
             cv2.imshow("Webcam Emotion (Mediapipe + ResNet18)", frame)
 
