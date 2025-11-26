@@ -46,6 +46,14 @@ export default function NewVisit() {
   const [transcriptionError, setTranscriptionError] = useState(null);
   const [showNewPatientDialog, setShowNewPatientDialog] = useState(false);
   const transcriptionListenerRef = useRef(null);
+  // Camera refs and state for dual feeds
+  const video1Ref = useRef(null);
+  const video2Ref = useRef(null);
+  const canvas1Ref = useRef(null);
+  const canvas2Ref = useRef(null);
+  const cameraStreamRef = useRef(null);
+  const animationRef = useRef(null);
+  const [camerasActive, setCamerasActive] = useState(false);
   const [newPatient, setNewPatient] = useState({
     first_name: "",
     last_name: "",
@@ -77,8 +85,87 @@ export default function NewVisit() {
         transcriptionListenerRef.current();
       }
       transcriptionService.disconnect();
+      // stop camera streams if active
+      try {
+        if (cameraStreamRef.current) {
+          cameraStreamRef.current.getTracks().forEach((t) => t.stop());
+          cameraStreamRef.current = null;
+        }
+        if (animationRef.current) {
+          cancelAnimationFrame(animationRef.current);
+        }
+      } catch (err) {
+        console.warn('Error cleaning up camera streams', err);
+      }
     };
   }, []);
+
+  // Start both camera feeds (for now both attach the default webcam stream)
+  const startCameras = async () => {
+    try {
+      if (cameraStreamRef.current) return;
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 }, audio: false });
+      cameraStreamRef.current = stream;
+      if (video1Ref.current) {
+        video1Ref.current.srcObject = stream;
+        video1Ref.current.play().catch(() => {});
+      }
+      if (video2Ref.current) {
+        // attach same stream for prototype/demo purposes
+        video2Ref.current.srcObject = stream;
+        video2Ref.current.play().catch(() => {});
+      }
+      setCamerasActive(true);
+      // start a lightweight overlay loop
+      const loop = () => {
+        try {
+          [
+            { video: video1Ref.current, canvas: canvas1Ref.current },
+            { video: video2Ref.current, canvas: canvas2Ref.current }
+          ].forEach(({ video, canvas }, idx) => {
+            if (!video || !canvas) return;
+            const ctx = canvas.getContext('2d');
+            canvas.width = video.videoWidth || 640;
+            canvas.height = video.videoHeight || 480;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            // simple overlay: timestamp and active badge
+            ctx.fillStyle = 'rgba(0,0,0,0.35)';
+            ctx.fillRect(8, 8, 160, 28);
+            ctx.fillStyle = '#fff';
+            ctx.font = '12px Inter, ui-sans-serif, system-ui';
+            ctx.fillText(new Date().toLocaleTimeString(), 16, 26);
+            // label corner
+            ctx.fillStyle = idx === 0 ? 'rgba(16,185,129,0.9)' : 'rgba(14,165,233,0.9)';
+            ctx.beginPath();
+            ctx.arc(canvas.width - 18, 18, 8, 0, Math.PI * 2);
+            ctx.fill();
+          });
+        } catch (err) {
+          // ignore overlay errors
+        }
+        animationRef.current = requestAnimationFrame(loop);
+      };
+      animationRef.current = requestAnimationFrame(loop);
+    } catch (err) {
+      console.error('Could not start cameras', err);
+      alert('Unable to access camera. Make sure the site is served over HTTPS or use localhost and grant permissions.');
+    }
+  };
+
+  const stopCameras = () => {
+    try {
+      if (cameraStreamRef.current) {
+        cameraStreamRef.current.getTracks().forEach((t) => t.stop());
+        cameraStreamRef.current = null;
+      }
+      if (video1Ref.current) video1Ref.current.srcObject = null;
+      if (video2Ref.current) video2Ref.current.srcObject = null;
+      if (animationRef.current) cancelAnimationFrame(animationRef.current);
+    } catch (err) {
+      console.warn('Error stopping cameras', err);
+    }
+    setCamerasActive(false);
+  };
 
   // Handle transcription updates
   useEffect(() => {
@@ -525,6 +612,52 @@ export default function NewVisit() {
                   </p>
                 </div>
               )}
+            </div>
+          </CardContent>
+        </Card>
+        <Card className="border-teal-200 bg-white/80 backdrop-blur mb-4">
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <CardTitle className="flex items-center gap-2 text-base text-teal-900">
+                <FileText className="w-4 h-4" />
+                Live Monitoring
+              </CardTitle>
+              <div className="flex items-center gap-2">
+                {!camerasActive ? (
+                  <Button size="sm" variant="outline" onClick={startCameras} className="border-teal-200">Start Cameras</Button>
+                ) : (
+                  <Button size="sm" variant="destructive" onClick={stopCameras}>Stop Cameras</Button>
+                )}
+              </div>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-2 gap-4">
+              {/* Motion Analysis (left) */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-sm font-semibold text-teal-900">Motion Analysis</h4>
+                  <span className="text-xs text-gray-500">Live</span>
+                </div>
+                <div className="relative bg-black rounded overflow-hidden" style={{aspectRatio: '4/3'}}>
+                  <video ref={video1Ref} className="w-full h-full object-cover" playsInline muted />
+                  <canvas ref={canvas1Ref} className="absolute inset-0 w-full h-full pointer-events-none" />
+                </div>
+                <p className="text-xs text-gray-600">Using webcam (prototype). Motion overlay shown.</p>
+              </div>
+
+              {/* Facial Analysis (right) */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-sm font-semibold text-teal-900">Facial Analysis</h4>
+                  <span className="text-xs text-gray-500">Live</span>
+                </div>
+                <div className="relative bg-black rounded overflow-hidden" style={{aspectRatio: '4/3'}}>
+                  <video ref={video2Ref} className="w-full h-full object-cover" playsInline muted />
+                  <canvas ref={canvas2Ref} className="absolute inset-0 w-full h-full pointer-events-none" />
+                </div>
+                <p className="text-xs text-gray-600">Using webcam (prototype). Facial landmarks / analysis will be added.</p>
+              </div>
             </div>
           </CardContent>
         </Card>

@@ -1,5 +1,6 @@
 # Virtual environments
 venv/
+venv_min/
 .env
 __pycache__/
 *.pyc

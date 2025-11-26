@@ -8,11 +8,13 @@ import sounddevice as sd
 import time
 from datetime import timedelta
 from faster_whisper import WhisperModel
+import sounddevice as sd
+
 
 # ========= CONFIG =========
-SAMPLE_RATE = 16000
+SAMPLE_RATE = 48000  # Hz
 CHANNELS = 2       # 2 for interface, auto-falls back to 1 if not available
-DEVICE_INDEX = None  # None = default input device
+DEVICE_INDEX = 14 # None = default input device, will have to set manually for the audio box
 SILENCE_THRESHOLD = 300   # lower = more sensitive
 MIN_SPEECH = 0.5          # seconds of minimum speech before a pause can trigger
 SILENCE_DURATION = 0.8     # seconds of silence that defines a pause
@@ -21,6 +23,9 @@ SILENCE_DURATION = 0.8     # seconds of silence that defines a pause
 # Optional colors for console
 NEON_GREEN = "\033[92m"
 RESET_COLOR = "\033[0m"
+
+print(sd.query_devices())
+print(sd.query_devices()[DEVICE_INDEX])
 
 # ====== AUDIO HELPERS ======
 try:
@@ -93,6 +98,7 @@ def transcribe(model, audio, sr, speaker_label, start_time, end_time):
 
 
 # ====== MAIN ======
+# ====== MAIN ======
 def main():
     global CHANNELS
     try:
@@ -129,6 +135,8 @@ def main():
     min_chunks = int(MIN_SPEECH * chunks_per_second)
     silence_limit = int(SILENCE_DURATION * chunks_per_second)
 
+    RMS_THRESHOLD = 0.01  # minimal RMS to consider the mic speaking
+
     try:
         while True:
             frames = []
@@ -142,11 +150,20 @@ def main():
                 if data is None or len(data) == 0:
                     continue
 
-                rms = _rms_bytes((data * 32767).astype(np.int16).tobytes())
-                silent = rms < SILENCE_THRESHOLD
+                # Compute RMS for monitoring
+                if data.ndim == 1 or data.shape[1] == 1:
+                    ch1_rms = np.sqrt(np.mean(data**2))
+                    ch2_rms = 0.0
+                else:
+                    ch1_rms = np.sqrt(np.mean(data[:,0]**2))
+                    ch2_rms = np.sqrt(np.mean(data[:,1]**2))
+
+                print(f"\rRMS -> Mic 1: {ch1_rms:.3f}, Mic 2: {ch2_rms:.3f}", end="")
+
+                silent = max(ch1_rms, ch2_rms) < RMS_THRESHOLD
 
                 if not silent and speech_start_time is None:
-                    speech_start_time = time.time() - session_start  # mark when speech starts
+                    speech_start_time = time.time() - session_start  # mark start
 
                 frames.append(data)
 
@@ -157,8 +174,7 @@ def main():
                     speaking_chunks += 1
 
                 if speaking_chunks > min_chunks and silent_chunks > silence_limit:
-                    # pause detected → stop and process this utterance
-                    break
+                    break  # pause detected
 
             # Combine frames into one numpy array
             audio_chunk = np.concatenate(frames, axis=0)
@@ -168,24 +184,27 @@ def main():
             if np.mean(np.abs(audio_chunk)) < 1e-4:
                 continue
 
-            # Split by channels
+            # ===== Transcribe channels individually =====
             if audio_chunk.ndim == 1 or audio_chunk.shape[1] == 1:
-                text = transcribe(model,
-                                  audio_chunk[:, 0] if audio_chunk.ndim > 1 else audio_chunk,
-                                  SAMPLE_RATE, "Speaker 1",
-                                  speech_start_time, speech_end_time)
-                if text:
-                    transcripts.append(text)
+                if np.sqrt(np.mean(audio_chunk**2)) > RMS_THRESHOLD:
+                    text = transcribe(model, audio_chunk, SAMPLE_RATE, "Mic 1",
+                                      speech_start_time, speech_end_time)
+                    if text:
+                        transcripts.append(text)
             else:
-                ch1, ch2 = audio_chunk[:, 0], audio_chunk[:, 1]
-                text1 = transcribe(model, ch1, SAMPLE_RATE, "Speaker 1",
-                                   speech_start_time, speech_end_time)
-                text2 = transcribe(model, ch2, SAMPLE_RATE, "Speaker 2",
-                                   speech_start_time, speech_end_time)
-                if text1:
-                    transcripts.append(text1)
-                if text2:
-                    transcripts.append(text2)
+                ch1, ch2 = audio_chunk[:,0], audio_chunk[:,1]
+
+                if np.sqrt(np.mean(ch1**2)) > RMS_THRESHOLD:
+                    text_mic1 = transcribe(model, ch1, SAMPLE_RATE, "Mic 1",
+                                           speech_start_time, speech_end_time)
+                    if text_mic1:
+                        transcripts.append(text_mic1)
+
+                if np.sqrt(np.mean(ch2**2)) > RMS_THRESHOLD:
+                    text_mic2 = transcribe(model, ch2, SAMPLE_RATE, "Mic 2",
+                                           speech_start_time, speech_end_time)
+                    if text_mic2:
+                        transcripts.append(text_mic2)
 
     except KeyboardInterrupt:
         print("\n🛑 Stopping transcription...")
@@ -195,7 +214,6 @@ def main():
         with open("transcript_log.txt", "w", encoding="utf-8") as f:
             f.write("\n".join(transcripts))
         print("📝 Transcripts saved to transcript_log.txt")
-
 
 if __name__ == "__main__":
     main()
