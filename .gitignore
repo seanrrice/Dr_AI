@@ -1,0 +1,47 @@
+# --------------------------
+# Virtual environments
+# --------------------------
+.venv/
+.venv311/
+venv/
+env/
+
+# --------------------------
+# Python bytecode/cache
+# --------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# --------------------------
+# Jupyter Notebook cache
+# --------------------------
+.ipynb_checkpoints/
+
+# --------------------------
+# Large data or archive folders
+# --------------------------
+archive/
+
+# --------------------------
+# Model weights and large outputs
+# --------------------------
+*.pth
+*.pt
+
+# --------------------------
+# Generated images / plots
+# --------------------------
+*.png
+
+# --------------------------
+# VS Code settings
+# --------------------------
+.vscode/
+
+# --------------------------
+# System files
+# --------------------------
+Thumbs.db
+.DS_Store
