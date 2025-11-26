@@ -220,59 +220,5 @@ Then update the script’s model-loading path accordingly.
 
 
 
----
-
-
-
-```
-
-
-
----
-
-
-
-\# 🔥 Notes
-
-
-
-✔ All markdown fences fixed  
-
-✔ Code blocks render correctly  
-
-✔ Directory tree renders properly  
-
-✔ PowerShell syntax is correct  
-
-✔ Subsystem description is precise  
-
-✔ No stray characters, no broken formatting  
-
-✔ Looks professional on GitHub
-
-
-
----
-
-
-
-If you want, I can also help:
-
-
-
-\- Add a \*\*top-level README\*\* for the whole project  
-
-\- Add a \*\*model\_weights/README.md\*\*  
-
-\- Create a visual architecture diagram for the Doctor AI system  
-
-\- Link this pipeline into your team’s documentation
-
-
-
-Just tell me!
-
-```
-
 
 
