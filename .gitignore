@@ -1,3 +1,4 @@
+# ------------------From emotion analysis (Sean)-----------------
 # --------------------------
 # Virtual environments
 # --------------------------
@@ -45,3 +46,14 @@ archive/
 # --------------------------
 Thumbs.db
 .DS_Store
+
+#-------------From Other team's commits (likely Victoria or Carson)----------------------
+
+node_modules
+dist
+.env
+.env.local
+*.log
+.DS_Store
+.vscode
+.idea
