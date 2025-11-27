@@ -63,6 +63,27 @@ Once started, the app should automatically open in your browser at:
    ollama serve
    ```
 
+3. **Optional: Audio Transcription Server**
+   The app includes real-time audio transcription functionality. To use it:
+   
+   **Terminal 1 - Start React App:**
+   ```bash
+   npm run dev
+   ```
+   
+   **Terminal 2 - Start Transcription Server:**
+   ```bash
+   cd DrAITranscription
+   .\venv\Scripts\Activate.ps1  # Windows
+   # or source venv/bin/activate  # Mac/Linux
+   pip install -r requirements.txt
+   python app.py
+   ```
+   
+   The transcription server will run on `http://localhost:5000`
+   
+   See `DrAITranscription/SETUP.md` for detailed setup instructions.
+
 ---
 
 ## TERMINAL COMMANDS SUMMARY
