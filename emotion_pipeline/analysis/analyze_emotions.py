@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 #1. Load emotion log file into data frame
-df = pd.read_csv("emotion_logs/visit_emotions.csv")  #df stands for "Data Frame"
+df = pd.read_csv("../emotion_logs/visit_emotions.csv")  #df stands for "Data Frame"
 #preview logged data
 df.head()
 
