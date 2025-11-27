@@ -47,6 +47,13 @@ archive/
 Thumbs.db
 .DS_Store
 
+# --------------------------
+# csv files from patient data
+# --------------------------
+emotion_pipeline/emotion_logs/
+
+
+
 #-------------From Other team's commits (likely Victoria or Carson)----------------------
 
 node_modules
