@@ -11,7 +11,7 @@ import csv
 from datetime import datetime
 from pathlib import Path
 from emotion_logger import EmotionVisitLogger
-
+import statistics
 
 # ==========================
 # CONFIG
@@ -20,11 +20,20 @@ from emotion_logger import EmotionVisitLogger
 CHECKPOINT_PATH = "best_model.pth"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-label_history = deque(maxlen=10)     #last 10 predictions
+# IMPORTANT: must match training class order exactly
+# (same order as NEW_CLASSES / full_train_ds.classes)
+EMOTION_LABELS = ["Angry", "Disgust", "Happy", "LowAffect", "Arousal"]
+NUM_CLASSES = len(EMOTION_LABELS)
+
+# Real-time smoothing
+label_history = deque(maxlen=10)     #last 10 predictions (used for smoothing real-time inference display)
+CONF_THRESHOLD = 0.5
+LOG_INTERVAL_SEC = 0.5
 
 # must match validation/test transforms 
 inference_transform = transforms.Compose([
-    transforms.Resize((224, 224)),
+    transforms.Resize(256),                             #modified
+    transforms.CenterCrop(224),                         #modified
     transforms.ToTensor(),
     transforms.Normalize(
         mean=[0.485, 0.456, 0.406],
@@ -36,24 +45,23 @@ inference_transform = transforms.Compose([
 # MODEL
 # ==========================
 
-def build_model(num_classes: int):
-    model = models.resnet18(weights=None)       #We'll load our own trained weights
+def build_model(num_classes: int, dropout_p: float = 0.3):  #why float?
+    model = models.resnet34(weights=None)       #We'll load our own trained weights
     in_features = model.fc.in_features
     model.fc = nn.Sequential(
-        nn.Dropout(0.3),
-        nn.Linear(model.fc.in_features, num_classes)
+        nn.Dropout(dropout_p),
+        nn.Linear(in_features, num_classes)
     )
     return model
 
 print(" INFO: Loading model checkpoint...")
 
+model = build_model(num_classes = NUM_CLASSES, dropout_p=0.3)
 state_dict = torch.load(CHECKPOINT_PATH, map_location=DEVICE) 
-model = build_model(num_classes=7)
 model.load_state_dict(state_dict)
 model.to(DEVICE)
 model.eval()
 
-EMOTION_LABELS = ['angry', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surprise']
 
 print("[INFO] Model loaded and ready.")
 
@@ -62,7 +70,7 @@ print("[INFO] Model loaded and ready.")
 # ==========================
 
 mp_face_detection = mp.solutions.face_detection
-mp_drawing = mp.solutions.drawing_utils
+#mp_drawing = mp.solutions.drawing_utils # (need this?)
 
 def predict_emotion_from_face(face_bgr):
     # 
@@ -70,7 +78,7 @@ def predict_emotion_from_face(face_bgr):
     # returns: (label, confidence)
     # 
 
-     # Convert BGR -> RGB
+    # Convert BGR -> RGB
     face_rgb = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2RGB)
     img = Image.fromarray(face_rgb)
 
@@ -80,9 +88,10 @@ def predict_emotion_from_face(face_bgr):
     with torch.no_grad():
         logits = model(img_t)
         probs = F.softmax(logits, dim=1)[0] #num_classes
-        pred_idx = torch.argmax(probs).item()
+        pred_idx = int(torch.argmax(probs).item())      #modified
+        pred_conf = float(probs[pred_idx].item())
         pred_label = EMOTION_LABELS[pred_idx]
-        pred_conf = probs[pred_idx].item()
+        
 
     return pred_label, pred_conf
 
@@ -92,10 +101,33 @@ def get_smoothed_label(label_history):
     counts = Counter(label_history)
     return counts.most_common(1)[0][0]
 
+# ==========================
+# MAIN
+# ==========================
+
 def main():
 
-    log_interval = 0.5         #seconds
+    # For logging emotion data
     last_log_time = time.time()
+    emotion_counts = Counter()
+    total_samples = 0
+
+    # For measuring latency
+    latency_history = []
+
+    # Create a logger that knows about patient_id and visit_label
+    logger = EmotionVisitLogger(
+        emotion_labels=EMOTION_LABELS,
+        metadata_fields=["patient_id", "visit_label"],
+    )
+
+    # Ask who this is for
+    patient_id = input("Patient ID (or MRN / initials): ").strip()
+    if not patient_id:
+        patient_id = "Unknown"
+    
+    # Define visit_label
+    visit_label = datetime.now().date().isoformat()
 
     cap = cv2.VideoCapture(0)  # change to 1 if you have multiple cameras
     if not cap.isOpened():
@@ -106,28 +138,7 @@ def main():
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-    prev_time = time.time()
-
-    #for logging emotion data
-    emotion_counts = Counter()
-    total_samples = 0
-    CONF_THRESHOLD = 0.5
-
-    # Create a logger that knows about patient_id and visit_label
-    logger = EmotionVisitLogger(
-        emotion_labels=EMOTION_LABELS,
-        metadata_fields=["patient_id", "visit_label"],
-    )
-
-    #ask who this is for
-    patient_id = input("Patient ID (or MRN / initials): ").strip()
-    if not patient_id:
-        patient_id = "Unknown"
-    
-    #define visit_label
-    from datetime import datetime
-    visit_label = datetime.now().date().isoformat()
-
+    #prev_time = time.time()
 
     #mediapipe face detector
     with mp_face_detection.FaceDetection(
@@ -136,6 +147,10 @@ def main():
     ) as face_detection:
     
         while True:
+
+            #measure per frame latency
+            frame_start = time.time()
+
             ret, frame = cap.read()
             if not ret:
                 print("[WARN] Failed to grab frame")
@@ -166,19 +181,19 @@ def main():
                     if x_max <= x_min or y_max <= y_min:
                         continue
 
-                    #Crop face region
+                    # Crop face region
                     face_roi = frame[y_min:y_max, x_min:x_max]
 
-                    #Run emotion prediction
+                    # Run emotion prediction
                     label, conf = predict_emotion_from_face(face_roi)
                    
-                    #for smoothing real time display
+                    # For smoothing real time display
                     if conf > CONF_THRESHOLD:
                         label_history.append(label)
 
-                    #log smoothed emotion data
+                    # Log smoothed emotion data
                     now = time.time()
-                    if now - last_log_time >= log_interval:
+                    if now - last_log_time >= LOG_INTERVAL_SEC:
                         smoothed_label = get_smoothed_label(label_history)
                         if smoothed_label is not None:
                             emotion_counts[smoothed_label] += 1
@@ -191,9 +206,16 @@ def main():
                                   (0, 255, 0), 2)
                     #percent = int(conf*100)
                     #text = f"{label} {conf*percent}%
-                    text = smoothed_label
+                    text = smoothed_label if smoothed_label is not None else label #modified
                     cv2.putText(frame, text, (x_min, y_min - 10), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                    
+                    frame_end = time.time()
+                    latency_history.append((frame_end - frame_start) * 1000)
+
+                    if len(latency_history) >= 30:
+                        print(f"Avg latency for last 30 frames: {statistics.mean(latency_history):.2f} ms")
+                        latency_history = []
             
             # #FPS calculation
             # curr_time = time.time()
@@ -204,7 +226,7 @@ def main():
             #             cv2.FONT_HERSHEY_SIMPLEX, 0.7, 
             #             (0, 255, 0), 2)
             
-            cv2.imshow("Webcam Emotion (Mediapipe + ResNet18)", frame)
+            cv2.imshow("Webcam Emotion (Mediapipe + ResNet34)", frame)
 
             #Quit on 'q'
             if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -214,6 +236,7 @@ def main():
         cv2.destroyAllWindows()
 
         #--------VISIT SUMMARY LOGGING----------------------
+        log_time_start = time.time()
         logger.log_visit(
             emotion_counts=emotion_counts,
             total_samples = total_samples,
@@ -225,6 +248,9 @@ def main():
              # visit_id="patient123_visit3"
         )
 
+        log_time_end = time.time()
+
+        print(f" [INFO] logger latency: {((log_time_end - log_time_start) * 1000):.2f}ms")
 
 
 if __name__ == "__main__":
