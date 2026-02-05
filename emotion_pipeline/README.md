@@ -1,31 +1,35 @@
-# 📘 Emotion Analysis Pipeline  
-**(ResNet-34 / ResNet-18 + MediaPipe + Visit Logging)**
+# Emotion Analysis Pipeline
+(ResNet-34 / ResNet-18 + MediaPipe + Visit Logging)
 
-This directory contains the **facial emotion recognition subsystem** of the *Doctor AI* project.
+This directory contains the facial emotion recognition subsystem of the Doctor AI project.
 
-The subsystem supports **multiple emotion-model pipelines**, real-time inference, structured visit logging, and longitudinal affect analysis.
+The subsystem supports:
+- Multiple emotion-model training pipelines
+- Real-time webcam inference
+- Structured visit-level emotion logging
+- Longitudinal (serial) trend analysis
 
 ---
 
-# 📂 Project Structure (Current)
+## Project Structure
 
 emotion_pipeline/
 │
-├── .venv311/ # Runtime environment (CPU / inference)
-├── .venv_gpu/ # Training environment (GPU / CUDA)
+├── .venv311/                 Runtime environment (CPU / inference)
+├── .venv_gpu/                Training environment (GPU / CUDA)
 │
 ├── analysis/
-│ └── emotion_trend_analysis.ipynb
+│   └── emotion_trend_analysis.ipynb
 │
-├── emotion_logs/ # Auto-generated visit emotion CSVs
+├── emotion_logs/              Auto-generated visit emotion CSVs
 │
-├── master_dataset/ # Unified, curated dataset (non-FER2013)
+├── master_dataset/            Curated dataset for primary training
 │
-├── matlockDatasetPipeline.ipynb # ResNet-34 training on master_dataset
-├── fer2013_v2.ipynb # ResNet-18 training on FER-2013
+├── matlockDatasetPipeline.ipynb   ResNet-34 training on master_dataset
+├── fer2013_v2.ipynb               ResNet-18 training on FER-2013
 │
-├── webcam_emotion_mediapipe.py # Real-time inference + visit logging
-├── emotion_logger.py # Patient-aware CSV logging utility
+├── webcam_emotion_mediapipe.py    Real-time inference + visit logging
+├── emotion_logger.py              Patient-aware logging utility
 │
 ├── best_model.pth
 ├── confusion_matrix.png
@@ -35,171 +39,163 @@ emotion_pipeline/
 ├── requirements-runtime.txt
 └── README.md
 
+---
+
+## Environment Setup
+
+Two separate virtual environments are used to isolate training and runtime concerns.
+
+IMPORTANT:
+Virtual environments and Jupyter kernels are path-dependent.
+If this directory is renamed or moved, reinstall Jupyter and re-register kernels.
 
 ---
 
-# 🔧 Environment Setup
+### Training Environment (GPU)
 
-Two **separate virtual environments** are used to isolate training and runtime concerns.
+Used for all model training and dataset pipelines.
 
-> ⚠️ Virtual environments and Jupyter kernels are **path-dependent**.  
-> If this directory is renamed or moved, reinstall Jupyter and re-register kernels.
-
----
-
-## 🧠 Training Environment (GPU)
-
-Used for **all model training and dataset pipelines**.
-
-```powershell
+powershell:
 python -m venv .venv_gpu
-.\.venv_gpu\Scripts\Activate.ps1
+.\\.venv_gpu\\Scripts\\Activate.ps1
 python -m pip install --upgrade pip
 pip install -r requirements-train.txt
-(Optional) Register kernel:
 
+Optional kernel registration:
 python -m ipykernel install --user --name emotion_train --display-name "Python (emotion_train)"
-🎥 Runtime Environment (Inference)
+
+---
+
+### Runtime Environment (Inference)
+
 Used for webcam inference, logging, and analysis.
 
+powershell:
 python -m venv .venv311
-.\.venv311\Scripts\Activate.ps1
+.\\.venv311\\Scripts\\Activate.ps1
 python -m pip install --upgrade pip
 pip install -r requirements-runtime.txt
+
 Register kernel:
-
 python -m ipykernel install --user --name emotion_runtime --display-name "Python (emotion_runtime)"
+
 Launch Jupyter safely:
-
 python -m notebook
-🧠 Model Training Pipelines
-This repository contains two independent training pipelines, serving different experimental and deployment goals.
 
-🔬 Pipeline 1 — Master Dataset + ResNet-34
+---
+
+## Model Training Pipelines
+
+This repository contains two independent training pipelines.
+
+---
+
+### Pipeline 1 — Master Dataset + ResNet-34
+
+File:
 matlockDatasetPipeline.ipynb
 
-Primary research and deployment pipeline.
+This is the primary research and deployment pipeline.
 
-Uses a custom curated dataset:
-
-master_dataset/
-Trains a ResNet-34 backbone
-
-Higher model capacity and generalization
-
-Intended for final Doctor AI deployment models
+- Uses master_dataset/
+- Trains a ResNet-34 backbone
+- Higher model capacity and generalization
+- Intended for Doctor AI deployment models
 
 Responsibilities:
+- Dataset preprocessing
+- Train/validation/test splits
+- Model training and evaluation
+- Confusion matrix generation
+- Saving trained weights (best_model.pth)
 
-Dataset preprocessing and splits
+---
 
-ResNet-34 model definition
+### Pipeline 2 — FER-2013 + ResNet-18
 
-Training and evaluation
-
-Confusion matrix + metrics
-
-Saving trained weights (best_model.pth)
-
-🧪 Pipeline 2 — FER-2013 + ResNet-18
+File:
 fer2013_v2.ipynb
 
-Secondary / comparative pipeline.
+This is a secondary and comparative pipeline.
 
-Uses the FER-2013 dataset
-
-Trains a ResNet-18 backbone
-
-Lightweight and fast to train
-
-Used for benchmarking, ablation studies, and reproducibility
+- Uses the FER-2013 dataset
+- Trains a ResNet-18 backbone
+- Lightweight and fast to train
+- Used for benchmarking and ablation studies
 
 Dataset location:
-
 fer2013_dataset/
-This pipeline is not deprecated and remains useful for controlled experiments.
 
-🎥 Real-Time Emotion Detection
+This pipeline is not deprecated.
+
+---
+
+## Real-Time Emotion Detection
+
+File:
 webcam_emotion_mediapipe.py
 
 Performs real-time facial emotion recognition using:
-
-MediaPipe face detection
-
-A trained ResNet model (from either pipeline)
-
-OpenCV webcam capture
-
-Torch inference
-
-Structured per-visit emotion logging
+- MediaPipe face detection
+- Trained ResNet model (either pipeline)
+- OpenCV webcam capture
+- Torch inference
+- Structured per-visit logging
 
 Run:
-
 python webcam_emotion_mediapipe.py
-The model path can be swapped to evaluate ResNet-18 vs ResNet-34.
 
-🧾 Emotion Visit Logging
-emotion_logger.py
-
-Provides:
-
-Automatic creation of emotion_logs/
-
-Visit-level aggregation
-
-Emotion counts and percentages
-
-Patient and visit metadata
-
-Example:
-
-logger = EmotionVisitLogger(
-    emotion_labels=['angry','disgust','fear','happy','sad'],
-    metadata_fields=['patient_id', 'visit_label']
-)
-
-logger.log_visit(
-    emotion_counts,
-    total_samples,
-    meta={"patient_id": pid, "visit_label": label}
-)
-📊 Longitudinal Trend Analysis
-analysis/emotion_trend_analysis.ipynb
-
-Supports:
-
-End-of-visit summaries
-
-Emotion percentage trajectories across visits
-
-Dominant emotion analysis
-
-Patient-level filtering
-
-Chronological visit indexing
-
-📌 Notebook assumes it is launched from the project root.
-
-📦 Requirements Files
-File	Purpose
-requirements-train.txt	GPU training, PyTorch, torchvision, matplotlib
-requirements-runtime.txt	MediaPipe, OpenCV, lightweight inference
-🧼 Notes & Best Practices
-.venv311/, .venv_gpu/, master_dataset/, and emotion_logs/ should be gitignored
-
-Always launch Jupyter with:
-
-python -m notebook
-Two pipelines ≠ duplication — they serve different scientific purposes
-
-Prefer relative paths anchored to project root
-
+The model path can be swapped to compare ResNet-18 vs ResNet-34.
 
 ---
 
-## ✅ Option 2: Create it from PowerShell (no editor needed)
+## Emotion Visit Logging
 
-From the repo root:
-```powershell
-notepad README.md
+File:
+emotion_logger.py
+
+Provides:
+- Automatic creation of emotion_logs/
+- Visit-level aggregation
+- Emotion counts and percentages
+- Patient and visit metadata
+
+---
+
+## Longitudinal Trend Analysis
+
+File:
+analysis/emotion_trend_analysis.ipynb
+
+Supports:
+- End-of-visit summaries
+- Emotion trajectories across visits
+- Dominant emotion analysis
+- Patient-level filtering
+- Chronological visit indexing
+
+NOTE:
+Notebook should be launched from the project root so relative paths resolve correctly.
+
+---
+
+## Requirements Files
+
+requirements-train.txt  
+- GPU training
+- PyTorch / torchvision
+- Matplotlib and analysis tools
+
+requirements-runtime.txt  
+- MediaPipe
+- OpenCV
+- Lightweight inference dependencies
+
+---
+
+## Notes and Best Practices
+
+- .venv311/, .venv_gpu/, master_dataset/, and emotion_logs/ should be gitignored
+- Always launch Jupyter using: python -m notebook
+- Two pipelines serve different scientific purposes
+- Prefer relative paths anchored to project root
