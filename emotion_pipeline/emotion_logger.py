@@ -3,31 +3,33 @@ from pathlib import Path
 from datetime import datetime
 from collections import Counter
 from typing import Iterable, Optional
+from typing import Mapping, Any, List
 
 class EmotionVisitLogger:
     def __init__(
         self,
         log_dir: str = "emotion_logs",
-        filename: str = "visit_emotions.csv",
+        filename: str = "visit_emotions_5classes.csv",
         emotion_labels: Optional[Iterable[str]] = None,
         metadata_fields: Optional[Iterable[str]] = None,
     ):
 
         # emotion_labels: list of emotion class names
         # metadata_fields: list of extra columns to include, e.g. ["patient_id", "visit_label"]
-        
+        # if True, raises error if existing CSV header doesn't match expected schema
+
         if emotion_labels is None:
-            emotion_labels = ['angry', 'disgust', 'fear', 'happy', 'neutral', 'sad', 'surprise']
+            emotion_labels = ['Angry', 'Disgust', 'Happy', 'LowAffect', 'Arousal']
         
         if metadata_fields is None:
             metadata_fields = []
         
         self.emotion_labels = list(emotion_labels)
         self.metadata_fields = list(metadata_fields)
-
+    
         # Set up paths
         self.log_dir = Path(log_dir)
-        self.log_dir.mkdir(exist_ok=True)
+        self.log_dir.mkdir(parents=True, exist_ok=True)
 
         self.log_path = self.log_dir / filename
 
@@ -56,7 +58,7 @@ class EmotionVisitLogger:
             total_samples: int,
             visit_id: Optional[str] = None,
             visit_time: Optional[str] = None,
-            meta: Optional[str] = None,
+            meta: Optional[Mapping[str, Any]] = None,
     ):
         # Log a single visit summary.
 
@@ -89,8 +91,8 @@ class EmotionVisitLogger:
 
         row = (
             meta_values +
-            [visit_id, visit_time, total_samples] +
-            [emotion_counts[emo] for emo in self.emotion_labels]+
+            [visit_id, visit_time, int(total_samples)] +
+            [int(emotion_counts[emo]) for emo in self.emotion_labels]+
             [round(emotion_percent[emo], 2) for emo in self.emotion_labels]
         )
 

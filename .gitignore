@@ -4,6 +4,7 @@
 # --------------------------
 .venv/
 .venv311/
+.venv_gpu
 venv/
 env/
 
@@ -24,6 +25,8 @@ __pycache__/
 # Large data or archive folders
 # --------------------------
 archive/
+fer2013_dataset/
+master_dataset/
 
 # --------------------------
 # Model weights and large outputs
