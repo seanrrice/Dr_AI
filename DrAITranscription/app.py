@@ -18,7 +18,8 @@ except ImportError:
 
 # ================= CONFIG =================
 DEVICE_INDEX = 14      # PreSonus AudioBox USB 96
-SAMPLE_RATE = 48000
+SAMPLE_RATE_CAPTURE = 48000   # Device rate (must be supported by your interface, e.g. 44100 or 48000)
+SAMPLE_RATE_WHISPER = 16000   # Rate used for Whisper (saved WAV and model input)
 CHANNELS = 2
 CHUNK = 1024
 RMS_THRESHOLD = 0.01
@@ -58,6 +59,20 @@ def normalize_audio(audio):
         audio /= max_val
     return audio
 
+def resample_audio(audio, from_sr, to_sr):
+    """Resample 1D float32 audio from from_sr to to_sr. Returns mono float32."""
+    if from_sr == to_sr:
+        return audio
+    n = int(round(len(audio) * to_sr / from_sr))
+    try:
+        from scipy import signal
+        return signal.resample(audio, n).astype(np.float32)
+    except ImportError:
+        # Fallback: linear interpolation
+        x_old = np.linspace(0, 1, len(audio))
+        x_new = np.linspace(0, 1, n)
+        return np.interp(x_new, x_old, audio).astype(np.float32)
+
 def format_timestamp(seconds):
     td = int(seconds)
     mm, ss = divmod(td, 60)
@@ -84,7 +99,7 @@ class TranscriptionSession:
         self.is_running = True
         try:
             self.stream = sd.InputStream(device=DEVICE_INDEX,
-                                         samplerate=SAMPLE_RATE,
+                                         samplerate=SAMPLE_RATE_CAPTURE,
                                          channels=CHANNELS,
                                          dtype='float32')
             self.stream.start()
@@ -93,7 +108,7 @@ class TranscriptionSession:
             return
 
         session_start = time.time()
-        chunks_per_second = SAMPLE_RATE / CHUNK
+        chunks_per_second = SAMPLE_RATE_CAPTURE / CHUNK
         min_chunks = int(MIN_SPEECH * chunks_per_second)
         silence_limit = int(SILENCE_DURATION * chunks_per_second)
 
@@ -186,7 +201,9 @@ class TranscriptionSession:
 
     def transcribe_audio(self, audio, speaker_label, start_time, end_time):
         audio = normalize_audio(audio)
-        wav_path = save_wav_file(audio, SAMPLE_RATE, 1)
+        # Resample to 16 kHz for Whisper if we captured at a different rate
+        audio = resample_audio(audio, SAMPLE_RATE_CAPTURE, SAMPLE_RATE_WHISPER)
+        wav_path = save_wav_file(audio, SAMPLE_RATE_WHISPER, 1)
         start_stamp = format_timestamp(start_time)
         end_stamp = format_timestamp(end_time)
         try:
@@ -197,7 +214,7 @@ class TranscriptionSession:
                 text = "Simulated transcription"
             if text:
                 line = f"[{start_stamp} → {end_stamp}] {speaker_label}: {text}"
-                print(f"{NEON_GREEN}{line}{RESET_COLOR}")
+                print(f"{NEON_GREEN}{line}{RESET_COLOR}\n")
                 return line
             return ""
         except Exception as e:

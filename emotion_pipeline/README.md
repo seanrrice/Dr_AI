@@ -1,195 +1,201 @@
-# 📘 Emotion Analysis Pipeline (ResNet-18 + Mediapipe + Visit Logging)
+# Emotion Analysis Pipeline
+(ResNet-34 / ResNet-18 + MediaPipe + Visit Logging)
 
-This folder contains the **facial emotion recognition subsystem** of the Doctor AI project.
-It includes:
+This directory contains the facial emotion recognition subsystem of the Doctor AI project.
 
-* A training workflow for FER-2013
-* A **real-time Mediapipe + ResNet-18 webcam classifier**
-* A **patient-aware emotion logging system**
-* **Serial trend analysis + visualization tools** (Jupyter notebooks & CLI scripts)
-
-This subsystem is part of the *Doctor AI* system, which also includes frontend components, audio NLP modules, and multimodal clinical integration.
+The subsystem supports:
+- Multiple emotion-model training pipelines
+- Real-time webcam inference
+- Structured visit-level emotion logging
+- Longitudinal (serial) trend analysis
 
 ---
 
-# 📂 Contents
+## Project Structure
 
-```
 emotion_pipeline/
 │
-├── fer2013_v2.ipynb                # Training, evaluation, and model export
-├── webcam_emotion_mediapipe.py     # Real-time webcam classifier + visit logging
-├── emotion_logger.py               # Reusable patient-aware CSV logging utility
-├── analysis/
-│   ├── emotion_trend_analysis.ipynb  # Visualization + serial trend notebook
-│   └── analyze_emotions.py           # (optional) CLI-based trend analysis tool
+├── .venv311/                 Runtime environment (CPU / inference)
+├── .venv_gpu/                Training environment (GPU / CUDA)
 │
-├── emotion_logs/                   # Auto-generated per-visit emotion histories
-├── model_weights/                  # (ignored) store best_model.pth here
-└── requirements.txt                # Python dependencies
-```
+├── analysis/
+│   └── emotion_trend_analysis.ipynb
+│
+├── emotion_logs/              Auto-generated visit emotion CSVs
+│
+├── master_dataset/            Curated dataset for primary training
+│
+├── matlockDatasetPipeline.ipynb   ResNet-34 training on master_dataset
+├── fer2013_v2.ipynb               ResNet-18 training on FER-2013
+│
+├── webcam_emotion_mediapipe.py    Real-time inference + visit logging
+├── emotion_logger.py              Patient-aware logging utility
+│
+├── best_model.pth
+├── confusion_matrix.png
+├── training_history.png
+│
+├── requirements-train.txt
+├── requirements-runtime.txt
+└── README.md
 
 ---
 
-# 🔧 Environment Setup
+## Environment Setup
 
-### 1. Create and activate a virtual environment
+Two separate virtual environments are used to isolate training and runtime concerns.
 
-```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-```
-
-### 2. Install dependencies
-
-```powershell
-pip install -r requirements.txt
-```
-
-Python recommended: **3.11–3.12**
-(PyTorch wheels may not yet support Python **3.13+**)
+IMPORTANT:
+Virtual environments and Jupyter kernels are path-dependent.
+If this directory is renamed or moved, reinstall Jupyter and re-register kernels.
 
 ---
 
-# 🧠 FER-2013 Training Notebook (`fer2013_v2.ipynb`)
+### Training Environment (GPU)
 
-The notebook covers:
+Used for all model training and dataset pipelines.
 
-* FER-2013 dataset loading
-* Torch `Dataset` / transforms
-* ResNet-18 model construction
-* Training loop, validation loop
-* Accuracy/loss curves
-* Confusion matrix visualization
-* Saving `best_model.pth` (weights only)
+powershell:
+python -m venv .venv_gpu
+.\\.venv_gpu\\Scripts\\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements-train.txt
 
-Place FER-2013 under:
-
-```
-emotion_pipeline/data/fer2013/
-```
-
-(You may need to update the notebook paths.)
+Optional kernel registration:
+python -m ipykernel install --user --name emotion_train --display-name "Python (emotion_train)"
 
 ---
 
-# 🎥 Real-Time Emotion Detection
+### Runtime Environment (Inference)
 
-`webcam_emotion_mediapipe.py`
+Used for webcam inference, logging, and analysis.
 
-This script performs **real-time emotion recognition** using:
+powershell:
+python -m venv .venv311
+.\\.venv311\\Scripts\\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements-runtime.txt
 
-* **Mediapipe Face Detection**
-* A trained **ResNet-18 emotion classifier**
-* **OpenCV** for webcam access
-* **Torch inference**
-* **EmotionVisitLogger** for per-visit logging
+Register kernel:
+python -m ipykernel install --user --name emotion_runtime --display-name "Python (emotion_runtime)"
 
-### Running:
+Launch Jupyter safely:
+python -m notebook
 
-```powershell
+---
+
+## Model Training Pipelines
+
+This repository contains two independent training pipelines.
+
+---
+
+### Pipeline 1 — Master Dataset + ResNet-34
+
+File:
+matlockDatasetPipeline.ipynb
+
+This is the primary research and deployment pipeline.
+
+- Uses master_dataset/
+- Trains a ResNet-34 backbone
+- Higher model capacity and generalization
+- Intended for Doctor AI deployment models
+
+Responsibilities:
+- Dataset preprocessing
+- Train/validation/test splits
+- Model training and evaluation
+- Confusion matrix generation
+- Saving trained weights (best_model.pth)
+
+---
+
+### Pipeline 2 — FER-2013 + ResNet-18
+
+File:
+fer2013_v2.ipynb
+
+This is a secondary and comparative pipeline.
+
+- Uses the FER-2013 dataset
+- Trains a ResNet-18 backbone
+- Lightweight and fast to train
+- Used for benchmarking and ablation studies
+
+Dataset location:
+fer2013_dataset/
+
+This pipeline is not deprecated.
+
+---
+
+## Real-Time Emotion Detection
+
+File:
+webcam_emotion_mediapipe.py
+
+Performs real-time facial emotion recognition using:
+- MediaPipe face detection
+- Trained ResNet model (either pipeline)
+- OpenCV webcam capture
+- Torch inference
+- Structured per-visit logging
+
+Run:
 python webcam_emotion_mediapipe.py
-```
 
-### Features:
-
-✔ Real-time face detection
-✔ ResNet-18 classification
-✔ Smoothed predictions (optional)
-✔ Logs emotion counts & percentages
-✔ **Patient ID input at start of visit**
-✔ Generates a row in:
-
-```
-emotion_logs/visit_emotions.csv
-```
-
-### CSV Includes:
-
-* patient_id
-* visit_label
-* visit_id (auto-generated)
-* timestamp
-* total_samples logged
-* angry_count, disgust_count, …
-* angry_pct, disgust_pct, …
-
-Perfect for **serial trend analysis**.
+The model path can be swapped to compare ResNet-18 vs ResNet-34.
 
 ---
 
-# 🧾 Visit Logging
+## Emotion Visit Logging
 
-`emotion_logger.py`
+File:
+emotion_logger.py
 
-This class provides:
-
-✔ Automatic creation of `emotion_logs/`
-✔ Automatic header creation
-✔ Logging per-visit counts & percentages
-✔ Metadata fields (e.g., patient_id, visit_label)
-✔ Easily extendable for future doctor-facing metrics
-
-Example usage (inside webcam script):
-
-```python
-logger = EmotionVisitLogger(
-    emotion_labels=['angry','disgust','fear','happy','sad','surprise','neutral'],
-    metadata_fields=['patient_id', 'visit_label']
-)
-logger.log_visit(emotion_counts, total_samples, meta={"patient_id": id, "visit_label": label})
-```
+Provides:
+- Automatic creation of emotion_logs/
+- Visit-level aggregation
+- Emotion counts and percentages
+- Patient and visit metadata
 
 ---
 
-# 📊 Serial Trend Analysis
+## Longitudinal Trend Analysis
 
-`analysis/emotion_trend_analysis.ipynb`
+File:
+analysis/emotion_trend_analysis.ipynb
 
-This Jupyter notebook allows clinicians & researchers to visualize:
+Supports:
+- End-of-visit summaries
+- Emotion trajectories across visits
+- Dominant emotion analysis
+- Patient-level filtering
+- Chronological visit indexing
 
-## End-of-Visit Report
-
-* Pie chart (emotion percentage distribution)
-* Bar chart (emotion intensity comparison)
-* Count and percentage tables
-
-## Longitudinal (Serial) Trend Analysis
-
-* Emotion percent trajectories across visits
-* Dominant emotion per visit
-* Visit numbering (chronologically)
-* Patient filtering
-* Data exploration via Pandas
-
-Ideal for evaluating changes in affect across multiple clinical encounters.
+NOTE:
+Notebook should be launched from the project root so relative paths resolve correctly.
 
 ---
 
-# 🔍 Optional CLI Tool
+## Requirements Files
 
-`analysis/analyze_emotions.py` *(optional)*
+requirements-train.txt  
+- GPU training
+- PyTorch / torchvision
+- Matplotlib and analysis tools
 
-A command-line interface for quick analysis:
-
-```powershell
-python analyze_emotions.py --patient Tony --show
-python analyze_emotions.py --patient Tony --export-pdf
-```
-
-Enables batch analysis, automated reporting, or backend integration.
+requirements-runtime.txt  
+- MediaPipe
+- OpenCV
+- Lightweight inference dependencies
 
 ---
 
-# 💾 Model Weights
+## Notes and Best Practices
 
-Model weights (`best_model.pth`) are **not stored in the repo**.
-
-Place your trained model here:
-
-```
-emotion_pipeline/model_weights/best_model.pth
-```
-
-Update the path in `webcam_emotion_mediapipe.py` accordingly.
-
+- .venv311/, .venv_gpu/, master_dataset/, and emotion_logs/ should be gitignored
+- Always launch Jupyter using: python -m notebook
+- Two pipelines serve different scientific purposes
+- Prefer relative paths anchored to project root

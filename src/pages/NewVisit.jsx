@@ -172,11 +172,11 @@ export default function NewVisit() {
     if (isTranscribing) {
       transcriptionListenerRef.current = transcriptionService.addListener((event, data) => {
         if (event === 'update') {
-          // Append new transcription text with newline (includes timestamps and speaker labels)
+          // Append new transcription text with newline after each segment (includes timestamps and speaker labels)
           setVisitData(prev => ({
             ...prev,
             transcription: prev.transcription 
-              ? `${prev.transcription}\n${data.text}`.trim()
+              ? `${prev.transcription}\n\n${data.text}`.trim()
               : data.text
           }));
         } else if (event === 'complete') {
