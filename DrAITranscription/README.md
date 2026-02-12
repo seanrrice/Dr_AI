@@ -5,4 +5,4 @@ python -m pip install -U pip setuptools wheel
 pip install -r requirements.txt
 
 # run
-python AudioTranscribe.py
+python app.py
