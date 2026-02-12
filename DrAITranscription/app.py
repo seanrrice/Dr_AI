@@ -26,6 +26,32 @@ RMS_THRESHOLD = 0.01
 MIN_SPEECH = 0.5       # seconds
 SILENCE_DURATION = 0.8 # seconds
 
+# Auto-detect GPU for faster-whisper (NVIDIA CUDA) with fallback to CPU.
+# We use a very lightweight check via `nvidia-smi`. If it succeeds, we assume
+# a CUDA-capable GPU is available and use float16 on GPU; otherwise we stay on CPU int8.
+if WhisperModel is not None:
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["nvidia-smi"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode == 0:
+            DEVICE = "cuda"
+            COMPUTE_TYPE = "float16"
+            print("[OK] Using CUDA GPU for Whisper (device='cuda', compute_type='float16')")
+        else:
+            raise RuntimeError("nvidia-smi returned non-zero exit code")
+    except Exception:
+        DEVICE = "cpu"
+        COMPUTE_TYPE = "int8"
+        print("[WARNING] CUDA GPU not detected; using CPU for Whisper (device='cpu', compute_type='int8')")
+else:
+    DEVICE = "cpu"
+    COMPUTE_TYPE = "int8"
+
 # Optional colors for console
 NEON_GREEN = "\033[92m"
 RESET_COLOR = "\033[0m"
@@ -90,7 +116,12 @@ class TranscriptionSession:
         self.model = None
         if WhisperModel:
             try:
-                self.model = WhisperModel("small.en", device="cpu", compute_type="int8")
+                # DEVICE / COMPUTE_TYPE are chosen at import time based on whether
+                # an NVIDIA GPU (CUDA) is available. On an RTX laptop, this will
+                # normally select device='cuda', compute_type='float16'; on your
+                # current AMD/CPU machine it will fall back to device='cpu',
+                # compute_type='int8' automatically.
+                self.model = WhisperModel("small.en", device=DEVICE, compute_type=COMPUTE_TYPE)
             except Exception as e:
                 print(f"[Session] Failed to load Whisper model: {e}")
                 self.model = None
@@ -112,7 +143,7 @@ class TranscriptionSession:
         min_chunks = int(MIN_SPEECH * chunks_per_second)
         silence_limit = int(SILENCE_DURATION * chunks_per_second)
 
-        print(f"🎙️ Transcription session started (Mic 1 = Ch1, Mic 2 = Ch2)")
+        print(f"[MIC] Transcription session started (Mic 1 = Ch1, Mic 2 = Ch2)")
 
         try:
             while self.is_running:
@@ -303,5 +334,5 @@ def handle_disconnect():
 
 # ====== Main ======
 if __name__ == '__main__':
-    print("🎙️ Starting transcription server on http://localhost:5000")
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True)
+    print("[MIC] Starting transcription server on http://localhost:5000")
+    socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)
