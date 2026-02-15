@@ -6,6 +6,7 @@
 .venv311/
 .venv_gpu
 venv/
+venv_runtime
 env/
 
 # --------------------------
