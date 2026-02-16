@@ -2,6 +2,7 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
+import queue
 import threading
 import numpy as np
 import sounddevice as sd
@@ -17,14 +18,18 @@ except ImportError:
     WhisperModel = None
 
 # ================= CONFIG =================
-DEVICE_INDEX = 14      # PreSonus AudioBox USB 96
-SAMPLE_RATE_CAPTURE = 48000   # Device rate (must be supported by your interface, e.g. 44100 or 48000)
-SAMPLE_RATE_WHISPER = 16000   # Rate used for Whisper (saved WAV and model input)
+# Try device 24 first (may give true stereo on some drivers); fallback to 15
+DEVICE_INDEX = 24     # PreSonus AudioBox USB 96 (callback-only on some Windows setups)
+DEVICE_INDEX_FALLBACK = 15   # Fallback if 24 fails
+SAMPLE_RATE_CAPTURE = 48000
+SAMPLE_RATE_WHISPER = 16000
 CHANNELS = 2
 CHUNK = 1024
 RMS_THRESHOLD = 0.01
 MIN_SPEECH = 0.5       # seconds
 SILENCE_DURATION = 0.8 # seconds
+# Callback-based capture (required for device 24 on Windows when blocking fails)
+USE_CALLBACK_CAPTURE = True
 
 # Optional colors for console
 NEON_GREEN = "\033[92m"
@@ -85,106 +90,171 @@ class TranscriptionSession:
         self.transcripts = []
         self.callback = None
         self.stream = None
+        self._audio_queue = queue.Queue()
 
         # Load Whisper model if available
         self.model = None
         if WhisperModel:
             try:
-                self.model = WhisperModel("small.en", device="cpu", compute_type="int8")
+                self.model = WhisperModel("small.en", device="cuda", compute_type="int8")
             except Exception as e:
                 print(f"[Session] Failed to load Whisper model: {e}")
                 self.model = None
 
-    def start(self):
-        self.is_running = True
-        try:
-            self.stream = sd.InputStream(device=DEVICE_INDEX,
-                                         samplerate=SAMPLE_RATE_CAPTURE,
-                                         channels=CHANNELS,
-                                         dtype='float32')
-            self.stream.start()
-        except sd.PortAudioError as e:
-            print(f"[Session] Audio input error: {e}")
+    def _process_segment(self, audio_chunk, speech_start_time, speech_end_time, session_start):
+        if np.mean(np.abs(audio_chunk)) < 1e-4:
             return
+        if audio_chunk.ndim == 1 or audio_chunk.shape[1] == 1:
+            if np.sqrt(np.mean(audio_chunk**2)) > RMS_THRESHOLD:
+                text = self.transcribe_audio(audio_chunk, "Mic 1",
+                                             speech_start_time, speech_end_time)
+                if text:
+                    self.transcripts.append(text)
+                    if self.callback:
+                        self.callback(text)
+        else:
+            ch1, ch2 = audio_chunk[:, 0], audio_chunk[:, 1]
+            if np.sqrt(np.mean(ch1**2)) > RMS_THRESHOLD:
+                text_mic1 = self.transcribe_audio(ch1, "Mic 1",
+                                                  speech_start_time, speech_end_time)
+                if text_mic1:
+                    self.transcripts.append(text_mic1)
+                    if self.callback:
+                        self.callback(text_mic1)
+            if np.sqrt(np.mean(ch2**2)) > RMS_THRESHOLD:
+                text_mic2 = self.transcribe_audio(ch2, "Mic 2",
+                                                   speech_start_time, speech_end_time)
+                if text_mic2:
+                    self.transcripts.append(text_mic2)
+                    if self.callback:
+                        self.callback(text_mic2)
 
-        session_start = time.time()
+    def _capture_callback(self, indata, frames, time_info, status):
+        if status:
+            print(f"[Session] Stream status: {status}")
+        if self.is_running and indata is not None and len(indata) > 0:
+            self._audio_queue.put(indata.copy())
+
+    def _run_worker(self, session_start):
         chunks_per_second = SAMPLE_RATE_CAPTURE / CHUNK
         min_chunks = int(MIN_SPEECH * chunks_per_second)
         silence_limit = int(SILENCE_DURATION * chunks_per_second)
-
-        print(f"🎙️ Transcription session started (Mic 1 = Ch1, Mic 2 = Ch2)")
-
-        try:
-            while self.is_running:
+        frames = []
+        silent_chunks = 0
+        speaking_chunks = 0
+        speech_start_time = None
+        while self.is_running:
+            try:
+                data = self._audio_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if data.ndim == 1 or data.shape[1] == 1:
+                ch1_rms = np.sqrt(np.mean(data**2))
+                ch2_rms = 0.0
+            else:
+                ch1_rms = np.sqrt(np.mean(data[:, 0]**2))
+                ch2_rms = np.sqrt(np.mean(data[:, 1]**2))
+            print(f"\rRMS -> Mic 1: {ch1_rms:.3f}, Mic 2: {ch2_rms:.3f}", end="")
+            silent = max(ch1_rms, ch2_rms) < RMS_THRESHOLD
+            if not silent and speech_start_time is None:
+                speech_start_time = time.time() - session_start
+            frames.append(data)
+            if silent:
+                silent_chunks += 1
+            else:
+                silent_chunks = 0
+                speaking_chunks += 1
+            if speaking_chunks > min_chunks and silent_chunks > silence_limit:
+                audio_chunk = np.concatenate(frames, axis=0)
+                speech_end_time = time.time() - session_start
+                self._process_segment(audio_chunk, speech_start_time, speech_end_time, session_start)
                 frames = []
                 silent_chunks = 0
                 speaking_chunks = 0
                 speech_start_time = None
 
-                # Capture one speech segment
-                while True:
-                    data, _ = self.stream.read(CHUNK)
-                    if data is None or len(data) == 0:
-                        continue
+    def start(self):
+        self.is_running = True
+        session_start = time.time()
+        device = DEVICE_INDEX
+        use_callback = USE_CALLBACK_CAPTURE
 
-                    if data.ndim == 1 or data.shape[1] == 1:
-                        ch1_rms = np.sqrt(np.mean(data**2))
-                        ch2_rms = 0.0
+        # Try callback-based stream (required for device 24 on some Windows drivers)
+        if use_callback:
+            for try_device in (DEVICE_INDEX, DEVICE_INDEX_FALLBACK):
+                try:
+                    self.stream = sd.InputStream(
+                        device=try_device,
+                        samplerate=SAMPLE_RATE_CAPTURE,
+                        channels=CHANNELS,
+                        dtype='float32',
+                        blocksize=CHUNK,
+                        callback=self._capture_callback,
+                    )
+                    self.stream.start()
+                    device = try_device
+                    print(f"🎙️ Transcription started (PreSonus stereo, device {try_device}, callback mode)")
+                    break
+                except sd.PortAudioError as e:
+                    if try_device == DEVICE_INDEX:
+                        print(f"[Session] Device {try_device} failed: {e}, trying fallback {DEVICE_INDEX_FALLBACK}")
                     else:
-                        ch1_rms = np.sqrt(np.mean(data[:,0]**2))
-                        ch2_rms = np.sqrt(np.mean(data[:,1]**2))
+                        print(f"[Session] Audio input error: {e}")
+                        self.is_running = False
+                        return
+        else:
+            try:
+                self.stream = sd.InputStream(
+                    device=device,
+                    samplerate=SAMPLE_RATE_CAPTURE,
+                    channels=CHANNELS,
+                    dtype='float32',
+                )
+                self.stream.start()
+                print(f"🎙️ Transcription started (Mic 1 = Ch1, Mic 2 = Ch2, device {device})")
+            except sd.PortAudioError as e:
+                print(f"[Session] Audio input error: {e}")
+                self.is_running = False
+                return
 
-                    print(f"\rRMS -> Mic 1: {ch1_rms:.3f}, Mic 2: {ch2_rms:.3f}", end="")
-
-                    silent = max(ch1_rms, ch2_rms) < RMS_THRESHOLD
-                    if not silent and speech_start_time is None:
-                        speech_start_time = time.time() - session_start
-
-                    frames.append(data)
-
-                    if silent:
-                        silent_chunks += 1
-                    else:
-                        silent_chunks = 0
-                        speaking_chunks += 1
-
-                    if speaking_chunks > min_chunks and silent_chunks > silence_limit:
-                        break
-
-                # Combine frames
-                audio_chunk = np.concatenate(frames, axis=0)
-                speech_end_time = time.time() - session_start
-
-                if np.mean(np.abs(audio_chunk)) < 1e-4:
-                    continue
-
-                # Transcribe channels individually
-                if audio_chunk.ndim == 1 or audio_chunk.shape[1] == 1:
-                    if np.sqrt(np.mean(audio_chunk**2)) > RMS_THRESHOLD:
-                        text = self.transcribe_audio(audio_chunk, "Mic 1",
-                                                     speech_start_time, speech_end_time)
-                        if text:
-                            self.transcripts.append(text)
-                            if self.callback:
-                                self.callback(text)
-                else:
-                    ch1, ch2 = audio_chunk[:,0], audio_chunk[:,1]
-
-                    if np.sqrt(np.mean(ch1**2)) > RMS_THRESHOLD:
-                        text_mic1 = self.transcribe_audio(ch1, "Mic 1",
-                                                          speech_start_time, speech_end_time)
-                        if text_mic1:
-                            self.transcripts.append(text_mic1)
-                            if self.callback:
-                                self.callback(text_mic1)
-
-                    if np.sqrt(np.mean(ch2**2)) > RMS_THRESHOLD:
-                        text_mic2 = self.transcribe_audio(ch2, "Mic 2",
-                                                          speech_start_time, speech_end_time)
-                        if text_mic2:
-                            self.transcripts.append(text_mic2)
-                            if self.callback:
-                                self.callback(text_mic2)
+        try:
+            if use_callback:
+                self._run_worker(session_start)
+            else:
+                # Blocking read path
+                chunks_per_second = SAMPLE_RATE_CAPTURE / CHUNK
+                min_chunks = int(MIN_SPEECH * chunks_per_second)
+                silence_limit = int(SILENCE_DURATION * chunks_per_second)
+                while self.is_running:
+                    frames = []
+                    silent_chunks = 0
+                    speaking_chunks = 0
+                    speech_start_time = None
+                    while True:
+                        data, _ = self.stream.read(CHUNK)
+                        if data is None or len(data) == 0:
+                            continue
+                        if data.ndim == 1 or data.shape[1] == 1:
+                            ch1_rms = np.sqrt(np.mean(data**2))
+                            ch2_rms = 0.0
+                        else:
+                            ch1_rms = np.sqrt(np.mean(data[:, 0]**2))
+                            ch2_rms = np.sqrt(np.mean(data[:, 1]**2))
+                        print(f"\rRMS -> Mic 1: {ch1_rms:.3f}, Mic 2: {ch2_rms:.3f}", end="")
+                        silent = max(ch1_rms, ch2_rms) < RMS_THRESHOLD
+                        if not silent and speech_start_time is None:
+                            speech_start_time = time.time() - session_start
+                        frames.append(data)
+                        if silent:
+                            silent_chunks += 1
+                        else:
+                            silent_chunks = 0
+                            speaking_chunks += 1
+                        if speaking_chunks > min_chunks and silent_chunks > silence_limit:
+                            break
+                    audio_chunk = np.concatenate(frames, axis=0)
+                    speech_end_time = time.time() - session_start
+                    self._process_segment(audio_chunk, speech_start_time, speech_end_time, session_start)
         except Exception as e:
             print(f"[Session] Exception in audio loop: {e}")
         finally:
@@ -193,8 +263,12 @@ class TranscriptionSession:
     def stop(self):
         self.is_running = False
         if self.stream:
-            self.stream.stop()
-            self.stream.close()
+            try:
+                self.stream.stop()
+                self.stream.close()
+            except Exception:
+                pass
+            self.stream = None
 
     def get_full_transcript(self):
         return "\n".join(self.transcripts)
