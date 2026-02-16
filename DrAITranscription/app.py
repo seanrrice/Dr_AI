@@ -193,7 +193,7 @@ class TranscriptionSession:
                     )
                     self.stream.start()
                     device = try_device
-                    print(f"🎙️ Transcription started (PreSonus stereo, device {try_device}, callback mode)")
+                    print(f"[Transcription] Started (PreSonus stereo, device {try_device}, callback mode)")
                     break
                 except sd.PortAudioError as e:
                     if try_device == DEVICE_INDEX:
@@ -211,7 +211,7 @@ class TranscriptionSession:
                     dtype='float32',
                 )
                 self.stream.start()
-                print(f"🎙️ Transcription started (Mic 1 = Ch1, Mic 2 = Ch2, device {device})")
+                print(f"[Transcription] Started (Mic 1 = Ch1, Mic 2 = Ch2, device {device})")
             except sd.PortAudioError as e:
                 print(f"[Session] Audio input error: {e}")
                 self.is_running = False
@@ -287,7 +287,7 @@ class TranscriptionSession:
             else:
                 text = "Simulated transcription"
             if text:
-                line = f"[{start_stamp} → {end_stamp}] {speaker_label}: {text}"
+                line = f"[{start_stamp} -> {end_stamp}] {speaker_label}: {text}"
                 print(f"{NEON_GREEN}{line}{RESET_COLOR}\n")
                 return line
             return ""
@@ -377,5 +377,5 @@ def handle_disconnect():
 
 # ====== Main ======
 if __name__ == '__main__':
-    print("🎙️ Starting transcription server on http://localhost:5000")
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True)
+    print("Starting transcription server on http://localhost:5000")
+    socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)
