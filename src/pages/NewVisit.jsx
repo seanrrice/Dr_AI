@@ -14,6 +14,12 @@ import { ArrowLeft, FileText, Brain, Loader2, UserPlus, CheckCircle, XCircle, Cl
 import { compareAllModels, getConsensusResult } from "@/services/aiService";
 import { transcriptionService } from "@/services/transcriptionService";
 
+// Show Patient/Doctor in UI; backend console keeps Mic 1 / Mic 2
+function formatTranscriptionForDisplay(text) {
+  if (!text) return text;
+  return text.replace(/Mic 1/g, "Patient").replace(/Mic 2/g, "Doctor");
+}
+
 export default function NewVisit() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -43,6 +49,7 @@ export default function NewVisit() {
     ollama: 'pending'
   });
   const [isTranscribing, setIsTranscribing] = useState(false);
+  const [isStartingTranscription, setIsStartingTranscription] = useState(false);
   const [transcriptionError, setTranscriptionError] = useState(null);
   const [showNewPatientDialog, setShowNewPatientDialog] = useState(false);
   const transcriptionListenerRef = useRef(null);
@@ -74,6 +81,11 @@ export default function NewVisit() {
     queryFn: () => api.entities.Visit.filter({ patient_id: selectedPatientId }),
     enabled: !!selectedPatientId
   });
+
+  // Preconnect to transcription server so Start Recording is faster
+  useEffect(() => {
+    transcriptionService.connect().catch(() => {});
+  }, []);
 
   // Cleanup transcription on unmount
   useEffect(() => {
@@ -172,18 +184,20 @@ export default function NewVisit() {
     if (isTranscribing) {
       transcriptionListenerRef.current = transcriptionService.addListener((event, data) => {
         if (event === 'update') {
-          // Append new transcription text with newline after each segment (includes timestamps and speaker labels)
+          // Append new transcription text with newline after each segment (Patient/Doctor in UI)
+          const displayText = formatTranscriptionForDisplay(data.text);
           setVisitData(prev => ({
             ...prev,
             transcription: prev.transcription 
-              ? `${prev.transcription}\n\n${data.text}`.trim()
-              : data.text
+              ? `${prev.transcription}\n\n${displayText}`.trim()
+              : displayText
           }));
         } else if (event === 'complete') {
-          // Final transcript received (already formatted with newlines)
+          // Final transcript received (Patient/Doctor in UI)
+          const displayFull = formatTranscriptionForDisplay(data.full_text || "");
           setVisitData(prev => ({
             ...prev,
-            transcription: data.full_text || prev.transcription
+            transcription: displayFull || prev.transcription
           }));
           setIsTranscribing(false);
         }
@@ -233,13 +247,15 @@ export default function NewVisit() {
   const handleStartTranscription = async () => {
     try {
       setTranscriptionError(null);
-      // Don't set UI state to "transcribing" until the server confirms the session started.
+      setIsStartingTranscription(true);
       await transcriptionService.start();
       setIsTranscribing(true);
     } catch (error) {
       console.error('Failed to start transcription:', error);
       setTranscriptionError(error.message || 'Failed to start transcription. Make sure the transcription server is running.');
       setIsTranscribing(false);
+    } finally {
+      setIsStartingTranscription(false);
     }
   };
 
@@ -249,7 +265,7 @@ export default function NewVisit() {
       if (result && result.full_text) {
         setVisitData(prev => ({
           ...prev,
-          transcription: result.full_text
+          transcription: formatTranscriptionForDisplay(result.full_text)
         }));
       }
       setIsTranscribing(false);
@@ -675,7 +691,18 @@ export default function NewVisit() {
               <div className="flex items-center justify-between">
                 <Label htmlFor="transcription" className="text-sm font-medium text-teal-900">Patient Transcription *</Label>
                 <div className="flex items-center gap-2">
-                  {!isTranscribing ? (
+                  {isStartingTranscription ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      disabled
+                      className="flex items-center gap-2 border-teal-200 bg-teal-50/50"
+                    >
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      Starting up...
+                    </Button>
+                  ) : !isTranscribing ? (
                     <Button
                       type="button"
                       variant="outline"
@@ -700,7 +727,13 @@ export default function NewVisit() {
                   )}
                 </div>
               </div>
-              {isTranscribing && (
+              {isStartingTranscription && (
+                <div className="flex items-center gap-2 text-xs text-teal-600">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  <span>Connecting and starting transcription...</span>
+                </div>
+              )}
+              {isTranscribing && !isStartingTranscription && (
                 <div className="flex items-center gap-2 text-xs text-blue-600">
                   <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
                   <span>Recording... Speak clearly into your microphone</span>
