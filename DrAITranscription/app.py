@@ -30,6 +30,9 @@ MIN_SPEECH = 0.5       # seconds
 SILENCE_DURATION = 0.8 # seconds
 # Callback-based capture (required for device 24 on Windows when blocking fails)
 USE_CALLBACK_CAPTURE = True
+# Max segments to queue for transcription; excess dropped to avoid long backlog
+MAX_SEGMENT_QUEUE = 2
+RMS_DISPLAY_INTERVAL = 0.05  # seconds between RMS console updates
 
 # Optional colors for console
 NEON_GREEN = "\033[92m"
@@ -91,6 +94,11 @@ class TranscriptionSession:
         self.callback = None
         self.stream = None
         self._audio_queue = queue.Queue()
+        self._segment_queue = queue.Queue(maxsize=MAX_SEGMENT_QUEUE)
+        self._transcript_lock = threading.Lock()
+        self._rms_lock = threading.Lock()
+        self._rms_ch1 = 0.0
+        self._rms_ch2 = 0.0
 
         # Load Whisper model if available
         self.model = None
@@ -101,31 +109,34 @@ class TranscriptionSession:
                 print(f"[Session] Failed to load Whisper model: {e}")
                 self.model = None
 
-    def _process_segment(self, audio_chunk, speech_start_time, speech_end_time, session_start):
+    def _process_segment(self, audio_chunk, speech_start_time, speech_end_time, session_start, queue_wait=0.0):
         if np.mean(np.abs(audio_chunk)) < 1e-4:
             return
         if audio_chunk.ndim == 1 or audio_chunk.shape[1] == 1:
             if np.sqrt(np.mean(audio_chunk**2)) > RMS_THRESHOLD:
                 text = self.transcribe_audio(audio_chunk, "Mic 1",
-                                             speech_start_time, speech_end_time)
+                                             speech_start_time, speech_end_time, queue_wait=queue_wait)
                 if text:
-                    self.transcripts.append(text)
+                    with self._transcript_lock:
+                        self.transcripts.append(text)
                     if self.callback:
                         self.callback(text)
         else:
             ch1, ch2 = audio_chunk[:, 0], audio_chunk[:, 1]
             if np.sqrt(np.mean(ch1**2)) > RMS_THRESHOLD:
                 text_mic1 = self.transcribe_audio(ch1, "Mic 1",
-                                                  speech_start_time, speech_end_time)
+                                                  speech_start_time, speech_end_time, queue_wait=queue_wait)
                 if text_mic1:
-                    self.transcripts.append(text_mic1)
+                    with self._transcript_lock:
+                        self.transcripts.append(text_mic1)
                     if self.callback:
                         self.callback(text_mic1)
             if np.sqrt(np.mean(ch2**2)) > RMS_THRESHOLD:
                 text_mic2 = self.transcribe_audio(ch2, "Mic 2",
-                                                   speech_start_time, speech_end_time)
+                                                   speech_start_time, speech_end_time, queue_wait=queue_wait)
                 if text_mic2:
-                    self.transcripts.append(text_mic2)
+                    with self._transcript_lock:
+                        self.transcripts.append(text_mic2)
                     if self.callback:
                         self.callback(text_mic2)
 
@@ -134,6 +145,39 @@ class TranscriptionSession:
             print(f"[Session] Stream status: {status}")
         if self.is_running and indata is not None and len(indata) > 0:
             self._audio_queue.put(indata.copy())
+            if indata.ndim == 1 or indata.shape[1] == 1:
+                r1 = float(np.sqrt(np.mean(indata**2)))
+                r2 = 0.0
+            else:
+                r1 = float(np.sqrt(np.mean(indata[:, 0]**2)))
+                r2 = float(np.sqrt(np.mean(indata[:, 1]**2)))
+            with self._rms_lock:
+                self._rms_ch1, self._rms_ch2 = r1, r2
+
+    def _rms_display_loop(self):
+        while self.is_running:
+            with self._rms_lock:
+                r1, r2 = self._rms_ch1, self._rms_ch2
+            print(f"\rRMS -> Mic 1: {r1:.3f}, Mic 2: {r2:.3f}", end="", flush=True)
+            time.sleep(RMS_DISPLAY_INTERVAL)
+
+    def _run_transcription_worker(self, session_start):
+        while self.is_running:
+            try:
+                item = self._segment_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            (audio_chunk, speech_start_time, speech_end_time, _sess_start, t_ready) = item
+            queue_wait = time.time() - t_ready
+            self._process_segment(audio_chunk, speech_start_time, speech_end_time, session_start, queue_wait=queue_wait)
+        while True:
+            try:
+                item = self._segment_queue.get_nowait()
+            except queue.Empty:
+                break
+            (audio_chunk, speech_start_time, speech_end_time, _sess_start, t_ready) = item
+            queue_wait = time.time() - t_ready
+            self._process_segment(audio_chunk, speech_start_time, speech_end_time, session_start, queue_wait=queue_wait)
 
     def _run_worker(self, session_start):
         chunks_per_second = SAMPLE_RATE_CAPTURE / CHUNK
@@ -154,7 +198,6 @@ class TranscriptionSession:
             else:
                 ch1_rms = np.sqrt(np.mean(data[:, 0]**2))
                 ch2_rms = np.sqrt(np.mean(data[:, 1]**2))
-            print(f"\rRMS -> Mic 1: {ch1_rms:.3f}, Mic 2: {ch2_rms:.3f}", end="")
             silent = max(ch1_rms, ch2_rms) < RMS_THRESHOLD
             if not silent and speech_start_time is None:
                 speech_start_time = time.time() - session_start
@@ -167,7 +210,18 @@ class TranscriptionSession:
             if speaking_chunks > min_chunks and silent_chunks > silence_limit:
                 audio_chunk = np.concatenate(frames, axis=0)
                 speech_end_time = time.time() - session_start
-                self._process_segment(audio_chunk, speech_start_time, speech_end_time, session_start)
+                t_ready = time.time()
+                try:
+                    self._segment_queue.put_nowait((audio_chunk, speech_start_time, speech_end_time, session_start, t_ready))
+                except queue.Full:
+                    try:
+                        self._segment_queue.get_nowait()
+                    except queue.Empty:
+                        pass
+                    try:
+                        self._segment_queue.put_nowait((audio_chunk, speech_start_time, speech_end_time, session_start, t_ready))
+                    except queue.Full:
+                        pass
                 frames = []
                 silent_chunks = 0
                 speaking_chunks = 0
@@ -219,6 +273,10 @@ class TranscriptionSession:
 
         try:
             if use_callback:
+                transcribe_thread = threading.Thread(target=self._run_transcription_worker, args=(session_start,), daemon=True)
+                transcribe_thread.start()
+                rms_thread = threading.Thread(target=self._rms_display_loop, daemon=True)
+                rms_thread.start()
                 self._run_worker(session_start)
             else:
                 # Blocking read path
@@ -271,9 +329,11 @@ class TranscriptionSession:
             self.stream = None
 
     def get_full_transcript(self):
-        return "\n".join(self.transcripts)
+        with self._transcript_lock:
+            return "\n".join(self.transcripts)
 
-    def transcribe_audio(self, audio, speaker_label, start_time, end_time):
+    def transcribe_audio(self, audio, speaker_label, start_time, end_time, queue_wait=0.0):
+        t0 = time.perf_counter()
         audio = normalize_audio(audio)
         # Resample to 16 kHz for Whisper if we captured at a different rate
         audio = resample_audio(audio, SAMPLE_RATE_CAPTURE, SAMPLE_RATE_WHISPER)
@@ -287,8 +347,11 @@ class TranscriptionSession:
             else:
                 text = "Simulated transcription"
             if text:
+                elapsed = time.perf_counter() - t0
+                segment_duration = end_time - start_time
+                total = segment_duration + queue_wait + elapsed
                 line = f"[{start_stamp} -> {end_stamp}] {speaker_label}: {text}"
-                print(f"{NEON_GREEN}{line}{RESET_COLOR}\n")
+                print(f"{NEON_GREEN}({elapsed:.1f} s transcribe, {total:.1f} s total): \"{text}\"{RESET_COLOR}\n")
                 return line
             return ""
         except Exception as e:
@@ -359,10 +422,12 @@ def get_status():
     session_id = request.args.get('session_id', 'default')
     if session_id in active_sessions:
         session = active_sessions[session_id]
+        with session._transcript_lock:
+            count = len(session.transcripts)
         return jsonify({
             'active': session.is_running,
             'session_id': session_id,
-            'transcript_count': len(session.transcripts)
+            'transcript_count': count
         })
     return jsonify({'active': False, 'session_id': session_id})
 
