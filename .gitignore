@@ -4,9 +4,14 @@
 # --------------------------
 .venv/
 .venv311/
-.venv_gpu
+.venv_gpu/
+.venv_runtime/
 venv/
 env/
+
+# Python cache
+__pycache__/
+*.pyc
 
 # --------------------------
 # Python bytecode/cache
