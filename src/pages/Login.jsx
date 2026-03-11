@@ -165,20 +165,7 @@ export default function Login() {
               </button>
             </div>
 
-            {!isSignUp && (
-              <div className="mt-6 p-4 bg-slate-50 rounded-lg">
-                <p className="text-xs text-slate-600 font-semibold mb-2">Demo Accounts:</p>
-                <div className="space-y-1 text-xs text-slate-500">
-                  <p>Username: <span className="font-mono">victoria</span> | Password: <span className="font-mono">password1234</span></p>
-                  <p>Username: <span className="font-mono">lelli</span> | Password: <span className="font-mono">password1234</span></p>
-                  <p>Username: <span className="font-mono">sean</span> | Password: <span className="font-mono">password1234</span></p>
-                  <p>Username: <span className="font-mono">carson</span> | Password: <span className="font-mono">password1234</span></p>
-                  <p>Username: <span className="font-mono">dani</span> | Password: <span className="font-mono">password1234</span></p>
-                  <p>Username: <span className="font-mono">avyesh</span> | Password: <span className="font-mono">password1234</span></p>
-                  <p>Username: <span className="font-mono">admin</span> | Password: <span className="font-mono">admin123</span></p>
-                </div>
-              </div>
-            )}
+            
           </CardContent>
         </Card>
 

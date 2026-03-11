@@ -57,12 +57,12 @@ export default function Patients() {
 
   const deletePatientMutation = useMutation({
     mutationFn: async (patientId) => {
-      // First, delete all visits associated with this patient
+      // delete all visits associated with this patient
       const patientVisits = visits.filter(v => v.patient_id === patientId);
       await Promise.all(
         patientVisits.map(visit => api.entities.Visit.delete(visit.id))
       );
-      // Then delete the patient
+      // delete the patient
       return api.entities.Patient.delete(patientId);
     },
     onSuccess: () => {

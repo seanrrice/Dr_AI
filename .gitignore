@@ -68,3 +68,7 @@ dist
 .DS_Store
 .vscode
 .idea
+
+# Zip files
+*.zip
+

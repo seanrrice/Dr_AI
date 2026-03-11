@@ -11,15 +11,13 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ArrowLeft, FileText, Brain, Loader2, UserPlus, CheckCircle, XCircle, Clock, Activity, Mic, MicOff } from "lucide-react";
-import { compareAllModels, getConsensusResult } from "@/services/aiService";
+import { compareAllModels, getConsensusResult, analyzeKeywords, analyzeSentiment, analyzeSemantics, extractPatientText } from "@/services/aiService";
 import { transcriptionService } from "@/services/transcriptionService";
-
-// Show Patient/Doctor in UI; backend console keeps Mic 1 / Mic 2
+import { AudioJsonlLogger, makeRelativeTimer } from "@/utils/jsonlLogger"; // ✅ new import
 function formatTranscriptionForDisplay(text) {
   if (!text) return text;
   return text.replace(/Mic 1/g, "Patient").replace(/Mic 2/g, "Doctor");
 }
-
 export default function NewVisit() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -30,29 +28,31 @@ export default function NewVisit() {
     chief_complaint: "",
     transcription: "",
     physician_notes: "",
-    // Vital signs
     bp_systolic: "",
     bp_diastolic: "",
     heart_rate: "",
     respiratory_rate: "",
     temperature: "",
     spo2: "",
-    // Physical measurements
     height: "",
     weight: "",
     bmi: ""
   });
-  const [units, setUnits] = useState('metric'); // 'metric' or 'imperial'
+  const [speakerSegments, setSpeakerSegments] = useState([]);
+  const [units, setUnits] = useState('metric');
+  const [tempUnit, setTempUnit] = useState('fahrenheit'); 
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [transcriptionError, setTranscriptionError] = useState(null);
+  const transcriptionListenerRef = useRef(null);
+  const jsonlLoggerRef = useRef(null);    // ✅ JSONL logger instance
+  const windowStartRef = useRef(null);   // ✅ tracks each window's start time
   const [analysisProgress, setAnalysisProgress] = useState({
     openai: 'pending',
     ollama: 'pending'
   });
-  const [isTranscribing, setIsTranscribing] = useState(false);
   const [isStartingTranscription, setIsStartingTranscription] = useState(false);
-  const [transcriptionError, setTranscriptionError] = useState(null);
   const [showNewPatientDialog, setShowNewPatientDialog] = useState(false);
-  const transcriptionListenerRef = useRef(null);
   // Camera refs and state for dual feeds
   const video1Ref = useRef(null);
   const video2Ref = useRef(null);
@@ -182,23 +182,36 @@ export default function NewVisit() {
   // Handle transcription updates
   useEffect(() => {
     if (isTranscribing) {
-      transcriptionListenerRef.current = transcriptionService.addListener((event, data) => {
+      transcriptionListenerRef.current = transcriptionService.addListener(async (event, data) => {
         if (event === 'update') {
-          // Append new transcription text with newline after each segment (Patient/Doctor in UI)
           const displayText = formatTranscriptionForDisplay(data.text);
           setVisitData(prev => ({
             ...prev,
-            transcription: prev.transcription 
+            transcription: prev.transcription
               ? `${prev.transcription}\n\n${displayText}`.trim()
               : displayText
           }));
+          if (jsonlLoggerRef.current && data.text) {
+            const logger = jsonlLoggerRef.current;
+            const now = Date.now();
+            const toRel = makeRelativeTimer(logger.t0);
+            const tStart = toRel(windowStartRef.current);
+            const tEnd = toRel(now);
+            windowStartRef.current = now;
+            const patientText = extractPatientText(data.text) || data.text;
+            const keywordAnalysis = analyzeKeywords(patientText);
+            const sentimentAnalysis = await analyzeSentiment(patientText);
+            const semanticAnalysis = analyzeSemantics(patientText);
+            logger.logWindow({ tStart, tEnd, wordCount: data.text.trim().split(/\s+/).length, keywordAnalysis, sentimentAnalysis, semanticAnalysis });
+          }
+
         } else if (event === 'complete') {
-          // Final transcript received (Patient/Doctor in UI)
           const displayFull = formatTranscriptionForDisplay(data.full_text || "");
-          setVisitData(prev => ({
-            ...prev,
-            transcription: displayFull || prev.transcription
-          }));
+          setVisitData(prev => ({ ...prev, transcription: displayFull || prev.transcription }));
+          setIsTranscribing(false);
+
+        } else if (event === 'error') {
+          setTranscriptionError(data.message);
           setIsTranscribing(false);
         }
       });
@@ -240,6 +253,7 @@ export default function NewVisit() {
       navigate(createPageUrl(`VisitDetails?id=${visit.id}`));
     },
   });
+
   const handleCreatePatient = () => {
     createPatientMutation.mutate(newPatient);
   };
@@ -249,10 +263,20 @@ export default function NewVisit() {
       setTranscriptionError(null);
       setIsStartingTranscription(true);
       await transcriptionService.start();
+
+      // Initialize the JSONL logger for this recording session
+      const t0 = Date.now();
+      jsonlLoggerRef.current = new AudioJsonlLogger({
+        visitId: selectedPatientId || `session_${t0}`,
+        patientId: selectedPatientId || 'unknown',
+        t0,
+      });
+      windowStartRef.current = t0;
+
       setIsTranscribing(true);
     } catch (error) {
       console.error('Failed to start transcription:', error);
-      setTranscriptionError(error.message || 'Failed to start transcription. Make sure the transcription server is running.');
+      setTranscriptionError(error.message || 'Failed to start transcription. Make sure the Python backend is running on port 5001.');
       setIsTranscribing(false);
     } finally {
       setIsStartingTranscription(false);
@@ -277,10 +301,13 @@ export default function NewVisit() {
     }
   };
 
+  const handleSpeakerSegments = (segment) => {
+    setSpeakerSegments(prev => [...prev, segment]);
+  };
+
   const analyzeTranscription = async () => {
     if (!visitData.transcription || !selectedPatientId) return;
     
-    // Validate required vitals
     if (!visitData.bp_systolic || !visitData.bp_diastolic || !visitData.heart_rate) {
       alert("Please enter required vital signs: Blood Pressure and Heart Rate");
       return;
@@ -290,13 +317,11 @@ export default function NewVisit() {
     setAnalysisProgress({ openai: 'running', ollama: 'running' });
 
     try {
-      // Run multi-model analysis 
       const results = await compareAllModels(visitData, (model, status) => {
         console.log(`${model}: ${status}`);
         setAnalysisProgress(prev => ({ ...prev, [model]: status }));
       });
 
-      // Get consensus result from successful models 
       const consensus = await getConsensusResult(results, visitData.transcription);
 
       if (!consensus) {
@@ -305,19 +330,59 @@ export default function NewVisit() {
         return;
       }
 
-      // Create visit with all analysis data including vitals
+      // Write summary record and flush audio.jsonl to backend
+      /*if (jsonlLoggerRef.current) {
+        jsonlLoggerRef.current.logSummary();
+        try {
+          await jsonlLoggerRef.current.flush('http://localhost:5001');
+          console.log(' audio.jsonl flushed to backend');
+        } catch (err) {
+          console.warn('⚠️ Could not flush audio.jsonl (backend may be offline):', err.message);
+          // non-fatal — visit still saves normally
+        }
+        jsonlLoggerRef.current = null;
+      }*/
+     // If no live recording was done, create a one-shot logger from manual text
+      if (!jsonlLoggerRef.current && visitData.transcription) {
+        const t0 = Date.now();
+        jsonlLoggerRef.current = new AudioJsonlLogger({
+          visitId: selectedPatientId,
+          patientId: selectedPatientId,
+          t0,
+        });
+        const patientText = extractPatientText(visitData.transcription) || visitData.transcription;
+        const keywordAnalysis   = analyzeKeywords(patientText);
+        const sentimentAnalysis = await analyzeSentiment(patientText);
+        const semanticAnalysis  = analyzeSemantics(patientText);
+        jsonlLoggerRef.current.logWindow({
+          tStart: 0,
+          tEnd: parseFloat((visitData.transcription.trim().split(/\s+/).length / 2.5).toFixed(3)),
+          wordCount: patientText.trim().split(/\s+/).length,
+          keywordAnalysis,
+          sentimentAnalysis,
+          semanticAnalysis,
+        });
+      }
+
+      if (jsonlLoggerRef.current) {
+        jsonlLoggerRef.current.logSummary();
+        jsonlLoggerRef.current.download();
+        jsonlLoggerRef.current = null;
+      }
+
+
       const visitNumber = existingVisits.length + 1;
       
       createVisitMutation.mutate({
         patient_id: selectedPatientId,
         visit_number: visitNumber,
         ...visitData,
-        // Store consensus results 
+        temperature_unit: tempUnit, 
+        speaker_segments: speakerSegments,
         keyword_analysis: consensus.keyword_analysis,
         sentiment_analysis: consensus.sentiment_analysis,
         semantic_analysis: consensus.semantic_analysis,
         ai_assessment: consensus.ai_assessment,
-        // Store all model results for comparison 
         ai_comparison: results
       });
 
@@ -328,23 +393,50 @@ export default function NewVisit() {
       setIsAnalyzing(false);
     }
   };
+
+  const calculateBMI = (weight, height) => {
+    if (!weight || !height) return "";
+    const bmi = (weight / ((height / 100) ** 2)).toFixed(1);
+    return bmi;
+  };
+
+  const handleWeightChange = (value) => {
+    setVisitData(prev => {
+      const newData = { ...prev, weight: value };
+      if (prev.height) {
+        newData.bmi = calculateBMI(value, prev.height);
+      }
+      return newData;
+    });
+  };
+
+  const handleHeightChange = (value) => {
+    setVisitData(prev => {
+      const newData = { ...prev, height: value };
+      if (prev.weight) {
+        newData.bmi = calculateBMI(prev.weight, value);
+      }
+      return newData;
+    });
+  };
         
   return (
     <div className="min-h-screen bg-gradient-to-br from-teal-50 via-green-50 to-emerald-50 p-8">
       <div className="max-w-4xl mx-auto">
-        {/* Header */}
-        <div className="flex items-center gap-4 mb-8">
-          <Button
-            variant="outline"
-            size="icon"
-            onClick={() => navigate(createPageUrl("Dashboard"))}
-            className="border-teal-200 hover:bg-teal-50"
-          >
-            <ArrowLeft className="w-4 h-4" />
-          </Button>
-          <div>
-            <h1 className="text-2xl font-semibold text-teal-900 mb-1">New Patient Visit</h1>
-            <p className="text-sm text-teal-700">Record and analyze patient consultation</p>
+        <div className="flex items-center justify-between gap-4 mb-8">
+          <div className="flex items-center gap-4">
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={() => navigate(createPageUrl("Dashboard"))}
+              className="border-teal-200 hover:bg-teal-50"
+            >
+              <ArrowLeft className="w-4 h-4" />
+            </Button>
+            <div>
+              <h1 className="text-2xl font-semibold text-teal-900 mb-1">New Patient Visit</h1>
+              <p className="text-sm text-teal-700">Record and analyze patient consultation</p>
+            </div>
           </div>
         </div>
 
@@ -356,7 +448,6 @@ export default function NewVisit() {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-5">
-            {/* Patient Selection */}
             <div className="space-y-2">
               <Label htmlFor="patient" className="text-sm font-medium text-teal-900">Select Patient *</Label>
               <div className="flex gap-2">
@@ -375,259 +466,204 @@ export default function NewVisit() {
                 <Button
                   variant="outline"
                   onClick={() => setShowNewPatientDialog(true)}
-                  className="flex items-center gap-2 border-teal-200 hover:bg-teal-50"
-                  size="sm"
+                  className="border-teal-300 hover:bg-teal-50"
                 >
-                  <UserPlus className="w-4 h-4" />
-                  New
-                </Button>
-              </div>
-              {selectedPatientId && (
-                <p className="text-xs text-teal-600">
-                  Visit #{existingVisits.length + 1} for this patient
-                </p>
-              )}
-            </div>
-
-            {/* Visit Date */}
-            <div className="space-y-2">
-              <Label htmlFor="visit_date" className="text-sm font-medium text-teal-900">Visit Date *</Label>
-              <Input
-                id="visit_date"
-                type="date"
-                value={visitData.visit_date}
-                onChange={(e) => setVisitData({...visitData, visit_date: e.target.value})}
-              />
-            </div>
-
-            {/* Chief Complaint */}
-            <div className="space-y-2">
-              <Label htmlFor="chief_complaint" className="text-sm font-medium text-teal-900">Chief Complaint</Label>
-              <Input
-                id="chief_complaint"
-                placeholder="e.g., Shortness of breath"
-                value={visitData.chief_complaint}
-                onChange={(e) => setVisitData({...visitData, chief_complaint: e.target.value})}
-              />
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* Vital Signs & Physical Measurements */}
-        <Card className="border-teal-200 bg-white/80 backdrop-blur mb-4">
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <CardTitle className="flex items-center gap-2 text-base text-teal-900">
-                <Activity className="w-4 h-4" />
-                Vital Signs & Physical Measurements
-              </CardTitle>
-              {/* Unit Toggle */}
-              <div className="flex items-center gap-2 text-sm">
-                <Button
-                  variant={units === 'metric' ? 'default' : 'outline'}
-                  size="sm"
-                  onClick={() => setUnits('metric')}
-                  className="h-7 text-xs"
-                >
-                  Metric
-                </Button>
-                <Button
-                  variant={units === 'imperial' ? 'default' : 'outline'}
-                  size="sm"
-                  onClick={() => setUnits('imperial')}
-                  className="h-7 text-xs"
-                >
-                  Imperial
+                  <UserPlus className="w-4 h-4 mr-2" />
+                  New Patient
                 </Button>
               </div>
             </div>
-          </CardHeader>
-          <CardContent className="space-y-5">
-            {/* Vital Signs - Required */}
-            <div className="space-y-3">
-              <h3 className="text-sm font-semibold text-teal-900">Vital Signs</h3>
-              
-              {/* Blood Pressure - Required */}
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-1">
-                  <Label htmlFor="bp_systolic" className="text-xs font-medium text-teal-900">
-                    Systolic BP * <span className="text-gray-500">(mmHg)</span>
-                  </Label>
-                  <Input
-                    id="bp_systolic"
-                    type="number"
-                    placeholder="120"
-                    value={visitData.bp_systolic}
-                    onChange={(e) => setVisitData({...visitData, bp_systolic: e.target.value})}
-                    className={visitData.bp_systolic && (parseInt(visitData.bp_systolic) < 90 || parseInt(visitData.bp_systolic) > 140) ? 'border-yellow-500' : ''}
-                  />
-                  {visitData.bp_systolic && parseInt(visitData.bp_systolic) > 140 && (
-                    <p className="text-xs text-yellow-600">⚠️ Elevated</p>
-                  )}
-                </div>
-                <div className="space-y-1">
-                  <Label htmlFor="bp_diastolic" className="text-xs font-medium text-teal-900">
-                    Diastolic BP * <span className="text-gray-500">(mmHg)</span>
-                  </Label>
-                  <Input
-                    id="bp_diastolic"
-                    type="number"
-                    placeholder="80"
-                    value={visitData.bp_diastolic}
-                    onChange={(e) => setVisitData({...visitData, bp_diastolic: e.target.value})}
-                    className={visitData.bp_diastolic && (parseInt(visitData.bp_diastolic) < 60 || parseInt(visitData.bp_diastolic) > 90) ? 'border-yellow-500' : ''}
-                  />
-                  {visitData.bp_diastolic && parseInt(visitData.bp_diastolic) > 90 && (
-                    <p className="text-xs text-yellow-600">⚠️ Elevated</p>
-                  )}
-                </div>
-              </div>
 
-              {/* Heart Rate - Required */}
-              <div className="space-y-1">
-                <Label htmlFor="heart_rate" className="text-xs font-medium text-teal-900">
-                  Heart Rate * <span className="text-gray-500">(bpm)</span>
-                </Label>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="visit_date" className="text-sm font-medium text-teal-900">Visit Date *</Label>
                 <Input
-                  id="heart_rate"
-                  type="number"
-                  placeholder="72"
-                  value={visitData.heart_rate}
-                  onChange={(e) => setVisitData({...visitData, heart_rate: e.target.value})}
-                  className={visitData.heart_rate && (parseInt(visitData.heart_rate) < 60 || parseInt(visitData.heart_rate) > 100) ? 'border-yellow-500' : ''}
+                  id="visit_date"
+                  type="date"
+                  value={visitData.visit_date}
+                  onChange={(e) => setVisitData({...visitData, visit_date: e.target.value})}
                 />
-                {visitData.heart_rate && (
-                  <p className="text-xs text-gray-500">
-                    {parseInt(visitData.heart_rate) < 60 ? '⚠️ Bradycardia' : 
-                     parseInt(visitData.heart_rate) > 100 ? '⚠️ Tachycardia' : 
-                     '✓ Normal'}
-                  </p>
-                )}
               </div>
+              <div className="space-y-2">
+                <Label htmlFor="chief_complaint" className="text-sm font-medium text-teal-900">Chief Complaint</Label>
+                <Input
+                  id="chief_complaint"
+                  placeholder="e.g., Shortness of breath"
+                  value={visitData.chief_complaint}
+                  onChange={(e) => setVisitData({...visitData, chief_complaint: e.target.value})}
+                />
+              </div>
+            </div>
 
-              {/* Optional Vitals */}
-              <div className="grid grid-cols-3 gap-3">
-                {/* Respiratory Rate */}
-                <div className="space-y-1">
-                  <Label htmlFor="respiratory_rate" className="text-xs font-medium text-gray-700">
-                    Respiratory Rate <span className="text-gray-500">(/min)</span>
-                  </Label>
+            <div className="space-y-3">
+              <h3 className="text-sm font-semibold text-teal-900">Vital Signs *</h3>
+              <div className="grid grid-cols-3 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="bp" className="text-xs">Blood Pressure (mmHg) *</Label>
+                  <div className="flex gap-2 items-center">
+                    <Input
+                      id="bp"
+                      type="number"
+                      placeholder="120"
+                      value={visitData.bp_systolic}
+                      onChange={(e) => setVisitData({...visitData, bp_systolic: e.target.value})}
+                      className="text-sm"
+                    />
+                    <span className="text-gray-400">/</span>
+                    <Input
+                      type="number"
+                      placeholder="80"
+                      value={visitData.bp_diastolic}
+                      onChange={(e) => setVisitData({...visitData, bp_diastolic: e.target.value})}
+                      className="text-sm"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="heart_rate" className="text-xs">Heart Rate (bpm) *</Label>
+                  <Input
+                    id="heart_rate"
+                    type="number"
+                    placeholder="72"
+                    value={visitData.heart_rate}
+                    onChange={(e) => setVisitData({...visitData, heart_rate: e.target.value})}
+                    className="text-sm"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <Label htmlFor="respiratory_rate" className="text-xs">Respiratory Rate (/min)</Label>
                   <Input
                     id="respiratory_rate"
                     type="number"
                     placeholder="16"
                     value={visitData.respiratory_rate}
                     onChange={(e) => setVisitData({...visitData, respiratory_rate: e.target.value})}
+                    className="text-sm"
                   />
                 </div>
 
-                {/* Temperature */}
-                <div className="space-y-1">
-                  <Label htmlFor="temperature" className="text-xs font-medium text-gray-700">
-                    Temp <span className="text-gray-500">({units === 'metric' ? '°C' : '°F'})</span>
-                  </Label>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <Label htmlFor="temperature" className="text-xs">Temperature</Label>
+                    <div className="flex gap-1">
+                      <Button
+                        type="button"
+                        variant={tempUnit === 'fahrenheit' ? 'default' : 'outline'}
+                        size="sm"
+                        onClick={() => setTempUnit('fahrenheit')}
+                        className="h-6 px-2 text-xs"
+                      >
+                        °F
+                      </Button>
+                      <Button
+                        type="button"
+                        variant={tempUnit === 'celsius' ? 'default' : 'outline'}
+                        size="sm"
+                        onClick={() => setTempUnit('celsius')}
+                        className="h-6 px-2 text-xs"
+                      >
+                        °C
+                      </Button>
+                    </div>
+                  </div>
                   <Input
                     id="temperature"
                     type="number"
                     step="0.1"
-                    placeholder={units === 'metric' ? '37.0' : '98.6'}
+                    placeholder={tempUnit === 'fahrenheit' ? '98.6' : '37.0'}
                     value={visitData.temperature}
                     onChange={(e) => setVisitData({...visitData, temperature: e.target.value})}
+                    className="text-sm"
                   />
                 </div>
 
-                {/* SpO2 */}
-                <div className="space-y-1">
-                  <Label htmlFor="spo2" className="text-xs font-medium text-gray-700">
-                    SpO₂ <span className="text-gray-500">(%)</span>
-                  </Label>
+                <div className="space-y-2">
+                  <Label htmlFor="spo2" className="text-xs">SpO2 (%)</Label>
                   <Input
                     id="spo2"
                     type="number"
                     placeholder="98"
                     value={visitData.spo2}
                     onChange={(e) => setVisitData({...visitData, spo2: e.target.value})}
-                    className={visitData.spo2 && parseInt(visitData.spo2) < 95 ? 'border-yellow-500' : ''}
+                    className="text-sm"
                   />
                 </div>
               </div>
             </div>
 
-            {/* Physical Measurements */}
-            <div className="space-y-3 pt-3 border-t border-gray-200">
-              <h3 className="text-sm font-semibold text-teal-900">Physical Measurements</h3>
-              
-              <div className="grid grid-cols-2 gap-3">
-                {/* Height */}
-                <div className="space-y-1">
-                  <Label htmlFor="height" className="text-xs font-medium text-gray-700">
-                    Height <span className="text-gray-500">({units === 'metric' ? 'cm' : 'in'})</span>
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-sm font-semibold text-teal-900">Physical Measurements</h3>
+                <div className="flex gap-2">
+                  <Button
+                    type="button"
+                    variant={units === 'metric' ? 'default' : 'outline'}
+                    size="sm"
+                    onClick={() => setUnits('metric')}
+                    className="text-xs"
+                  >
+                    Metric
+                  </Button>
+                  <Button
+                    type="button"
+                    variant={units === 'imperial' ? 'default' : 'outline'}
+                    size="sm"
+                    onClick={() => setUnits('imperial')}
+                    className="text-xs"
+                  >
+                    Imperial
+                  </Button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-3 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="height" className="text-xs">
+                    Height ({units === 'metric' ? 'cm' : 'in'})
                   </Label>
                   <Input
                     id="height"
                     type="number"
-                    step={units === 'metric' ? '1' : '0.1'}
+                    step="0.1"
                     placeholder={units === 'metric' ? '170' : '67'}
                     value={visitData.height}
-                    onChange={(e) => {
-                      const newHeight = e.target.value;
-                      setVisitData(prev => {
-                        const updated = {...prev, height: newHeight};
-                        // Auto-calculate BMI if both height and weight exist
-                        if (newHeight && prev.weight) {
-                          const h = units === 'metric' ? parseFloat(newHeight) / 100 : parseFloat(newHeight) * 0.0254;
-                          const w = units === 'metric' ? parseFloat(prev.weight) : parseFloat(prev.weight) * 0.453592;
-                          updated.bmi = (w / (h * h)).toFixed(1);
-                        }
-                        return updated;
-                      });
-                    }}
+                    onChange={(e) => handleHeightChange(e.target.value)}
+                    className="text-sm"
                   />
                 </div>
 
-                {/* Weight */}
-                <div className="space-y-1">
-                  <Label htmlFor="weight" className="text-xs font-medium text-gray-700">
-                    Weight <span className="text-gray-500">({units === 'metric' ? 'kg' : 'lbs'})</span>
+                <div className="space-y-2">
+                  <Label htmlFor="weight" className="text-xs">
+                    Weight ({units === 'metric' ? 'kg' : 'lbs'})
                   </Label>
                   <Input
                     id="weight"
                     type="number"
-                    step={units === 'metric' ? '0.1' : '0.1'}
+                    step="0.1"
                     placeholder={units === 'metric' ? '70' : '154'}
                     value={visitData.weight}
-                    onChange={(e) => {
-                      const newWeight = e.target.value;
-                      setVisitData(prev => {
-                        const updated = {...prev, weight: newWeight};
-                        // Auto-calculate BMI if both height and weight exist
-                        if (prev.height && newWeight) {
-                          const h = units === 'metric' ? parseFloat(prev.height) / 100 : parseFloat(prev.height) * 0.0254;
-                          const w = units === 'metric' ? parseFloat(newWeight) : parseFloat(newWeight) * 0.453592;
-                          updated.bmi = (w / (h * h)).toFixed(1);
-                        }
-                        return updated;
-                      });
-                    }}
+                    onChange={(e) => handleWeightChange(e.target.value)}
+                    className="text-sm"
                   />
                 </div>
-              </div>
 
-              {/* BMI Display */}
-              {visitData.bmi && (
-                <div className="p-3 bg-gray-50 rounded border">
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-medium text-gray-700">BMI:</span>
-                    <span className="text-lg font-bold text-teal-900">{visitData.bmi}</span>
+                {visitData.bmi && (
+                  <div className="space-y-2">
+                    <Label className="text-xs">BMI</Label>
+                    <div className="text-sm font-semibold text-teal-700 bg-teal-50 rounded px-3 py-2">
+                      {visitData.bmi}
+                    </div>
+                    <p className="text-xs text-gray-500 mt-1">
+                      {parseFloat(visitData.bmi) < 18.5 ? '⚠️ Underweight' :
+                       parseFloat(visitData.bmi) < 25 ? '✓ Normal' :
+                       parseFloat(visitData.bmi) < 30 ? '⚠️ Overweight' :
+                       '⚠️ Obese'}
+                    </p>
                   </div>
-                  <p className="text-xs text-gray-500 mt-1">
-                    {parseFloat(visitData.bmi) < 18.5 ? '⚠️ Underweight' :
-                     parseFloat(visitData.bmi) < 25 ? '✓ Normal' :
-                     parseFloat(visitData.bmi) < 30 ? '⚠️ Overweight' :
-                     '⚠️ Obese'}
-                  </p>
-                </div>
-              )}
+                )}
+              </div>
             </div>
           </CardContent>
         </Card>
@@ -678,7 +714,7 @@ export default function NewVisit() {
           </CardContent>
         </Card>
 
-        <Card className="border-teal-200 bg-white/80 backdrop-blur mb-4">
+        <Card className="border-teal-200 bg-white/80 backdrop-blur mb-4 mt-4">
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base text-teal-900">
               <FileText className="w-4 h-4" />
@@ -686,7 +722,6 @@ export default function NewVisit() {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-5">
-            {/* Transcription */}
             <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <Label htmlFor="transcription" className="text-sm font-medium text-teal-900">Patient Transcription *</Label>
@@ -752,11 +787,13 @@ export default function NewVisit() {
                 className="min-h-[180px] font-mono text-sm"
               />
               <p className="text-xs text-teal-600">
+                ✓ Real-time transcription with speaker detection and timestamps
+              </p>
+              <p className="text-xs text-slate-500">
                 AI will analyze with OpenAI GPT-4 and Ollama Llama (if running)
               </p>
             </div>
 
-            {/* Physician Notes */}
             <div className="space-y-2">
               <Label htmlFor="physician_notes" className="text-sm font-medium text-teal-900">Clinical Notes</Label>
               <Textarea
@@ -770,7 +807,6 @@ export default function NewVisit() {
           </CardContent>
         </Card>
 
-        {/* Analysis Progress */}
         {isAnalyzing && (
           <Card className="border-blue-200 bg-blue-50/50 mb-4">
             <CardContent className="pt-6">
@@ -797,14 +833,13 @@ export default function NewVisit() {
           </Card>
         )}
 
-        {/* Submit Button */}
         <Card className="border-teal-200 bg-gradient-to-br from-teal-50 to-emerald-50">
           <CardContent className="pt-5 pb-5">
             <div className="flex items-center justify-between">
               <div>
                 <h3 className="text-sm font-semibold text-teal-900 mb-1">Ready to Analyze</h3>
                 <p className="text-xs text-teal-700">
-                  Multi-model analysis (OpenAI + Ollama)
+                  Multi-model analysis (OpenAI + Ollama) with inter-word frequency tracking
                 </p>
               </div>
               <Button
@@ -828,7 +863,6 @@ export default function NewVisit() {
           </CardContent>
         </Card>
 
-        {/* New Patient Dialog */}
         <Dialog open={showNewPatientDialog} onOpenChange={setShowNewPatientDialog}>
           <DialogContent className="max-w-2xl">
             <DialogHeader>

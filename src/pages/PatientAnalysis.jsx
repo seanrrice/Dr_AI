@@ -66,7 +66,8 @@ export default function PatientAnalysis() {
   const allKeywords = {};
   visits.forEach(visit => {
     const keywords = visit.keyword_analysis?.diagnostic_keywords || {};
-    Object.entries(keywords).forEach(([word, count]) => {
+    Object.entries(keywords).forEach(([word, data]) => {
+      const count = typeof data === 'object' ? data.count : data;
       allKeywords[word] = (allKeywords[word] || 0) + count;
     });
   });
