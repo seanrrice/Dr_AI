@@ -348,8 +348,7 @@ class TranscriptionSession:
                 text = "Simulated transcription"
             if text:
                 elapsed = time.perf_counter() - t0
-                segment_duration = end_time - start_time
-                total = segment_duration + queue_wait + elapsed
+                total = SILENCE_DURATION + queue_wait + elapsed
                 line = f"[{start_stamp} -> {end_stamp}] {speaker_label}: {text}"
                 print(f"{NEON_GREEN}({elapsed:.1f} s transcribe, {total:.1f} s total): \"{text}\"{RESET_COLOR}\n")
                 return line
