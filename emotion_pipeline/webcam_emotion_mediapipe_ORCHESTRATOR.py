@@ -4,7 +4,9 @@ Webcam Emotion Detection - ORCHESTRATOR MODE
 This version reads t0 from manifest.json and syncs with orchestrator.
 Falls back to standalone mode if manifest.json is not found.
 """
+from __future__ import annotations
 
+import argparse
 import cv2
 import torch
 import torch.nn as nn
@@ -20,12 +22,20 @@ from emotion_logger_spec_v01_ORCHESTRATOR import EmotionVisitLogger
 import statistics
 import json
 
+import sys
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+from common_utils.orchestrator_utils import update_manifest_status  
 # ==========================
 # CONFIG
 # ==========================
 
-CHECKPOINT_PATH = "best_model.pth"
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+CHECKPOINT_PATH = PROJECT_ROOT / "models" / "facial_analysis" / "master_dataset_5class_v1.pth"
 
 EMOTION_LABELS = ["Angry", "Disgust", "Happy", "LowAffect", "Arousal"]
 NUM_CLASSES = len(EMOTION_LABELS)
@@ -95,6 +105,14 @@ def get_smoothed_label(label_history):
 # ORCHESTRATOR INTEGRATION
 # ==========================
 
+def parse_args():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--visit_id", default=None, help = "Visit ID created by orchestrator")
+    ap.add_argument("--patient_id", default=None, help="Patient identifier")
+    ap.add_argument("--visit_label", default=None, help="Visit label/date string")
+    ap.add_argument("--runs_dir", default="runs", help="Directory to save visit logs")
+    return ap.parse_args()
+
 def get_visit_t0(visit_dir: Path) -> tuple[float, bool]:
     """
     Get t0 (visit start time) from manifest.json if available.
@@ -116,7 +134,7 @@ def get_visit_t0(visit_dir: Path) -> tuple[float, bool]:
                     # Format: "2026-02-28T14:30:45Z"
                     dt = datetime.strptime(t0_str, "%Y-%m-%dT%H:%M:%SZ")
                     t0 = dt.timestamp()
-                    print(f"[INFO] Using orchestrator t0: {t0_str}")
+                    print(f"[INFO] Using orchestrator manifest t0: {t0_str}")
                     return t0, True
         except Exception as e:
             print(f"[WARN] Failed to read manifest.json: {e}")
@@ -132,42 +150,49 @@ def get_visit_t0(visit_dir: Path) -> tuple[float, bool]:
 # ==========================
 
 def main():
+    args = parse_args()
+
+    # Determine whether orchestrator supplied visit context
+    using_cli_visit = args.visit_id is not None and args.patient_id is not None
+
+    if using_cli_visit:
+        visit_id = args.visit_id
+        patient_id = args.patient_id
+        visit_label = args.visit_label if args.visit_label else datetime.now().date().isoformat()
+        runs_dir = Path(args.runs_dir)
+        visit_dir = runs_dir / f"visit_{visit_id}"
+        visit_dir.mkdir(parents=True, exist_ok=True)
+        print(f"[INFO] Orchestrator mode for visit_id={visit_id}")
+    else:
+        print("[INFO] No orchestrator visit args supplied; entering standalone mode")
+        patient_id = input("Patient ID (or MRN / initials): ").strip() or "Unknown"
+        visit_label = datetime.now().date().isoformat()
+        visit_id = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+        runs_dir = Path(args.runs_dir)
+        visit_dir = runs_dir / f"visit_{visit_id}"
+        visit_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Read t0 from manifest if available, otherwise use current time
+    t0, using_orchestrator = get_visit_t0(visit_dir)
+
+    # Update manifest status to "running" for face subsystem if using orchestrator
+    if using_cli_visit:
+        update_manifest_status(visit_dir, "face", "running")
+
+    # Create logger
+    logger = EmotionVisitLogger(
+        runs_dir = str(runs_dir),
+        emotion_labels=EMOTION_LABELS,
+        metadata_fields=["patient_id", "visit_label"],
+        model_version="resnet34_5class_v3"
+    )
+
     # For logging emotion data
     last_log_time = time.time()
     emotion_counts = Counter()
     total_samples = 0
     latency_history = []
 
-    # Create logger
-    logger = EmotionVisitLogger(
-        emotion_labels=EMOTION_LABELS,
-        metadata_fields=["patient_id", "visit_label"],
-        model_version="resnet34_5class_v3"
-    )
-
-    # Get patient info
-    patient_id = input("Patient ID (or MRN / initials): ").strip()
-    if not patient_id:
-        patient_id = "Unknown"
-    
-    visit_label = datetime.now().date().isoformat()
-    
-    # Generate visit_id (consistent format with orchestrator)
-    visit_id = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
-    
-    # Create visit directory
-    runs_dir = Path("runs")
-    visit_dir = runs_dir / f"visit_{visit_id}"
-    visit_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Get t0 - either from orchestrator or self-define
-    t0, using_orchestrator = get_visit_t0(visit_dir)
-    
-    if using_orchestrator:
-        print("[INFO] 🔗 ORCHESTRATOR MODE: Synced with manifest.json")
-    else:
-        print("[INFO] 🔧 STANDALONE MODE: Independent t0")
-    
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         print("[Error] Could not open webcam.")
@@ -177,7 +202,7 @@ def main():
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
     # Track visit start time
-    visit_start_time = time.time()
+    face_start_abs = time.time()
     
     with mp_face_detection.FaceDetection(
         model_selection=0,
@@ -195,6 +220,8 @@ def main():
             h, w, _ = frame.shape
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = face_detection.process(frame_rgb)
+
+            smoothed_label = None
 
             if results.detections:
                 for detection in results.detections:
@@ -246,30 +273,24 @@ def main():
         cap.release()
         cv2.destroyAllWindows()
 
-        # Calculate times relative to t0
-        visit_end_time = time.time()
-        t_start_relative = visit_start_time - t0
-        t_end_relative = visit_end_time - t0
-        visit_duration = visit_end_time - visit_start_time
-        
-        print(f"\n[INFO] Visit timing:")
-        print(f"  t0 (visit start):     {datetime.fromtimestamp(t0).strftime('%Y-%m-%d %H:%M:%S')}")
-        print(f"  Face started:         t={t_start_relative:.2f}s from t0")
-        print(f"  Face ended:           t={t_end_relative:.2f}s from t0")
-        print(f"  Face duration:        {visit_duration:.2f}s")
-        
+        face_end_abs = time.time()
+        face_duration = face_end_abs - face_start_abs
+
         # Choose which times to log based on mode
         if using_orchestrator:
-            # Orchestrator mode: use times relative to orchestrator's t0
-            log_t_start = t_start_relative
-            log_t_end = t_end_relative
+            log_t_start = face_start_abs - t0
+            log_t_end = face_end_abs - t0
             print(f"[INFO] Logging times relative to orchestrator t0")
         else:
-            # Standalone mode: use times relative to our own start
             log_t_start = 0.0
-            log_t_end = visit_duration
+            log_t_end = face_duration
             print(f"[INFO] Logging times relative to face subsystem start")
-
+        
+        print("\n[INFO] Face timing:")
+        print(f"  t_start = {log_t_start:.2f}s")
+        print(f"  t_end   = {log_t_end:.2f}s")
+        print(f"  duration= {face_duration:.2f}s")
+        
         # Log visit summary
         log_time_start = time.time()
         
@@ -277,7 +298,7 @@ def main():
             emotion_counts=emotion_counts,
             total_samples=total_samples,
             visit_id=visit_id,
-            visit_duration=visit_duration,
+            visit_duration=face_duration,
             t_start=log_t_start,  # Pass orchestrator-aware time
             t_end=log_t_end,      # Pass orchestrator-aware time
             meta={
@@ -286,15 +307,14 @@ def main():
             }
         )
 
+        #update manifest status to "done" for face subsystem if using orchestrator
+        if using_cli_visit:
+            update_manifest_status(visit_dir, "face", "done")
+
         log_time_end = time.time()
         print(f"\n[INFO] Logger latency: {((log_time_end - log_time_start) * 1000):.2f}ms")
         print(f"[INFO] Face subsystem complete!")
         
-        if using_orchestrator:
-            print(f"[INFO] ✅ Times logged relative to orchestrator t0")
-        else:
-            print(f"[INFO] ✅ Times logged in standalone mode")
-
 
 if __name__ == "__main__":
     main()

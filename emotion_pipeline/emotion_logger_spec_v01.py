@@ -141,7 +141,7 @@ class EmotionVisitLogger:
             print(f"[WARN] {face_jsonl_path} already exists, appending anyway")
         
         # Append the record (JSONL = one JSON per line)
-        with face_jsonl_path.open("a", encoding="utf-8") as f:
+        with face_jsonl_path.open("w", encoding="utf-8") as f:           # Write mode since we only log one summary per visit
             json.dump(record, f, ensure_ascii=False)
             f.write("\n")  # JSONL requires newline
         

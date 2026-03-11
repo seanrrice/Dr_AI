@@ -1,0 +1,73 @@
+{
+  "schema_version": "v0.1",
+  "generated_utc": "2026-03-11T21:04:15Z",
+  "visit_id": "V002",
+  "patient_id": "Test02",
+  "visit_label": "2026-03-11",
+  "manifest_created_utc": "2026-03-11T21:02:49Z",
+  "phases": {
+    "entry": {
+      "t_start": null,
+      "t_end": null
+    },
+    "encounter": {
+      "t_start": null,
+      "t_end": null
+    }
+  },
+  "expected_subsystems": [
+    "gait",
+    "face",
+    "audio"
+  ],
+  "availability": {
+    "face": "available",
+    "audio": "missing",
+    "gait": "missing"
+  },
+  "sections": {
+    "face_encounter_summary": {
+      "status": "available",
+      "phase": "encounter",
+      "t_start": -24252.95809197426,
+      "t_end": -24233.407748937607,
+      "confidence": 1.0,
+      "valid": true,
+      "model_version": "resnet34_5class_v3",
+      "visit_label": "2026-03-11",
+      "timestamp": "2026-03-11T14:02:15",
+      "total_samples": 36,
+      "pct_scale": "0-100",
+      "dominant_emotion": "happy",
+      "emotion_pct": {
+        "angry": 22.22,
+        "disgust": 22.22,
+        "happy": 27.78,
+        "low_affect": 27.78,
+        "arousal": 0.0
+      },
+      "emotion_counts": {
+        "angry": 8,
+        "disgust": 8,
+        "happy": 10,
+        "low_affect": 10,
+        "arousal": 0
+      }
+    },
+    "audio_encounter_summary": {
+      "status": "missing",
+      "message": "Audio subsystem output not available yet"
+    },
+    "gait_entry_summary": {
+      "status": "missing",
+      "message": "Gait subsystem output not available yet"
+    }
+  },
+  "figures": {
+    "face_emotion_bar": "figures\\face_emotion_bar.png"
+  },
+  "encounter_synthesis": {
+    "status": "pending",
+    "message": "Cross-modal synthesis will be added when audio and gait outputs are integrated"
+  }
+}

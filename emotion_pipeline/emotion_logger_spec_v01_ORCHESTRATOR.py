@@ -96,7 +96,6 @@ class EmotionVisitLogger:
             lowercase_key = self.emotion_key_map[emo]
             count = int(emotion_counts[emo])
             pct = round((count / total_samples) * 100.0, 2)
-            
             emotion_counts_dict[lowercase_key] = count
             emotion_pct_dict[lowercase_key] = pct
         
@@ -108,7 +107,7 @@ class EmotionVisitLogger:
             log_t_end = t_end
         else:
             log_t_start = 0.0
-            log_t_end = visit_duration if visit_duration else None
+            log_t_end = visit_duration if visit_duration is not None else None
         
         # Build the spec-compliant record (type="summary")
         record = {
@@ -154,8 +153,8 @@ class EmotionVisitLogger:
         if face_jsonl_path.exists():
             print(f"[WARN] {face_jsonl_path} already exists, appending anyway")
         
-        # Append the record (JSONL = one JSON per line)
-        with face_jsonl_path.open("a", encoding="utf-8") as f:
+        # Summary-only mode: overwrite for deterministic output
+        with face_jsonl_path.open("w", encoding="utf-8") as f:
             json.dump(record, f, ensure_ascii=False)
             f.write("\n")  # JSONL requires newline
         
@@ -163,6 +162,6 @@ class EmotionVisitLogger:
         print(f"     Visit ID: {visit_id}")
         print(f"     Patient: {patient_id}")
         print(f"     Samples: {total_samples}")
-        print(f"     Times: t_start={log_t_start:.2f}s, t_end={log_t_end if log_t_end else 'null'}s")
+        print(f"     Times: t_start={log_t_start:.2f}s, t_end={log_t_end if log_t_end is not None else 'null'}s")
         dominant = max(emotion_counts, key=emotion_counts.get)
         print(f"     Dominant: {dominant} ({emotion_pct_dict[self.emotion_key_map[dominant]]:.1f}%)")

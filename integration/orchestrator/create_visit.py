@@ -15,7 +15,7 @@ class VisitManifest:
     patient_id: str
     visit_label: Optional[str]
     created_utc: str
-    phases: str
+    phases: dict                            #change from str to dict
     expected_subsystems: list[str]
     status: dict
 

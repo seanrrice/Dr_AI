@@ -1,0 +1,27 @@
+{
+  "schema_version": "v0.1",
+  "visit_id": "V002",
+  "patient_id": "Test02",
+  "visit_label": "2026-03-11",
+  "created_utc": "2026-03-11T21:02:49Z",
+  "phases": {
+    "entry": {
+      "t_start": null,
+      "t_end": null
+    },
+    "encounter": {
+      "t_start": null,
+      "t_end": null
+    }
+  },
+  "expected_subsystems": [
+    "gait",
+    "face",
+    "audio"
+  ],
+  "status": {
+    "face": "pending",
+    "audio": "missing",
+    "gait": "missing"
+  }
+}
