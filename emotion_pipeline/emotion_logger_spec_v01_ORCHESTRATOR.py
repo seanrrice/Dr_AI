@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 from collections import Counter
 from typing import Iterable, Optional, Mapping, Any
 import time
@@ -77,7 +77,7 @@ class EmotionVisitLogger:
             return
         
         if visit_time is None:
-            visit_time = datetime.now().isoformat(timespec="seconds")
+            visit_time = datetime.now(timezone.utc).isoformat(timespec="seconds")
         if visit_id is None:
             visit_id = visit_time.replace(":", "-")
         

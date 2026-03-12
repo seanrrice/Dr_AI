@@ -11,6 +11,7 @@ from typing import Optional
 @dataclass
 class VisitManifest:
     schema_version: str
+    time_reference: str
     visit_id: str
     patient_id: str
     visit_label: Optional[str]
@@ -37,6 +38,7 @@ def main() -> None:
 
     manifest = VisitManifest(
         schema_version = "v0.1",
+        time_reference = "created_utc",
         visit_id = args.visit_id,
         patient_id = args.patient_id,
         visit_label = args.visit_label,

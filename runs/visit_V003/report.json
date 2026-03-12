@@ -1,10 +1,10 @@
 {
   "schema_version": "v0.1",
-  "generated_utc": "2026-03-12T22:06:50Z",
-  "visit_id": "V002",
+  "generated_utc": "2026-03-12T22:07:15Z",
+  "visit_id": "V003",
   "patient_id": "SeanTest",
   "visit_label": "2026-03-12",
-  "manifest_created_utc": "2026-03-12T21:45:11Z",
+  "manifest_created_utc": "2026-03-12T22:04:58Z",
   "phases": {
     "entry": {
       "t_start": null,
@@ -29,29 +29,29 @@
     "face_encounter_summary": {
       "status": "available",
       "phase": "encounter",
-      "t_start": -24661.58817911148,
-      "t_end": -24633.55234861374,
+      "t_start": -25172.88618993759,
+      "t_end": -25155.739594459534,
       "confidence": 1.0,
       "valid": true,
       "model_version": "resnet34_5class_v3",
       "visit_label": "2026-03-12",
-      "timestamp": "2026-03-12T14:54:37",
-      "total_samples": 52,
+      "timestamp": "2026-03-12T15:05:42",
+      "total_samples": 31,
       "pct_scale": "0-100",
       "dominant_emotion": "low_affect",
       "emotion_pct": {
         "angry": 0.0,
         "disgust": 0.0,
-        "happy": 38.46,
-        "low_affect": 50.0,
-        "arousal": 11.54
+        "happy": 25.81,
+        "low_affect": 61.29,
+        "arousal": 12.9
       },
       "emotion_counts": {
         "angry": 0,
         "disgust": 0,
-        "happy": 20,
-        "low_affect": 26,
-        "arousal": 6
+        "happy": 8,
+        "low_affect": 19,
+        "arousal": 4
       }
     },
     "audio_encounter_summary": {
