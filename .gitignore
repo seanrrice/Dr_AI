@@ -4,9 +4,10 @@
 # --------------------------
 .venv/
 .venv311/
-.venv_gpu
+.venv_gpu/
 venv/
-venv_runtime
+venv_training/
+venv_runtime/
 env/
 
 # --------------------------
@@ -34,6 +35,12 @@ master_dataset/
 # --------------------------
 *.pth
 *.pt
+*.onnx
+*.ckpt
+*.h5
+models/
+checkpoints/
+
 
 # --------------------------
 # Generated images / plots
@@ -57,6 +64,17 @@ Thumbs.db
 emotion_pipeline/emotion_logs/
 
 
+# --------------------------
+# Generated runtime data
+# --------------------------
+
+runs/
+
+# generated reports
+report.json
+
+# generated figures
+figures/
 
 #-------------From Other team's commits (likely Victoria or Carson)----------------------
 
