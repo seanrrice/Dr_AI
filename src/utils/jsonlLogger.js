@@ -15,6 +15,70 @@
 const SCHEMA_VERSION = 'v0.1';
 const WINDOW_DURATION_S = 10; // default audio window size
 
+// ─── Patient transcription parsing ───────────────────────────────────────────
+
+/** Parse "0:00:23" or "00:01:23" to seconds since start */
+function timestampToSeconds(str) {
+  if (!str || typeof str !== 'string') return 0;
+  const parts = str.trim().split(':').map((p) => parseInt(p, 10) || 0);
+  if (parts.length === 3) {
+    const [h, m, s] = parts;
+    return h * 3600 + m * 60 + s;
+  }
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  if (parts.length === 1) return parts[0];
+  return 0;
+}
+
+/**
+ * Parse transcription text into patient-only segments with timestamps.
+ * Supports lines like: "[00:01:23 → 00:01:45] Patient: text" or "[0:1:23 → 0:1:45] Mic 1: text".
+ * Lines without a timestamp (e.g. "Patient: text") get tStart/tEnd 0.
+ *
+ * @param {string} transcription - Full transcript with optional [start → end] Speaker: text per line
+ * @returns {{ tStart: number, tEnd: number, text: string }[]}
+ */
+export function parsePatientSegments(transcription) {
+  if (!transcription || typeof transcription !== 'string') return [];
+
+  const segments = [];
+  // With timestamp: [HH:MM:SS → HH:MM:SS] Patient: text  or  [H:M:S → H:M:S] Mic 1: text
+  const timestampedRe = /\[\s*([^\s\]]+)\s*→\s*([^\]\s]+)\s*\]\s*(Patient|Mic\s*1)\s*:\s*(.*)/i;
+  // No timestamp: Patient: text  or  Mic 1: text
+  const plainRe = /^(Patient|Mic\s*1)\s*:\s*(.*)/i;
+
+  const lines = transcription.split(/\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    let tStart = 0;
+    let tEnd = 0;
+    let text = '';
+
+    const tsMatch = trimmed.match(timestampedRe);
+    if (tsMatch) {
+      const [, startStr, endStr, , segmentText] = tsMatch;
+      tStart = timestampToSeconds(startStr);
+      tEnd = timestampToSeconds(endStr);
+      text = segmentText.trim();
+    } else {
+      const plainMatch = trimmed.match(plainRe);
+      if (plainMatch) {
+        text = plainMatch[2].trim();
+      } else {
+        continue; // not a patient line
+      }
+    }
+
+    if (text) {
+      segments.push({ tStart, tEnd, text });
+    }
+  }
+
+  return segments;
+}
+
 // ─── Mapping helpers ────────────────────────────────────────────────────────
 
 /**
@@ -194,6 +258,28 @@ export class AudioJsonlLogger {
     if (this._lastTEnd === null || tEnd > this._lastTEnd) this._lastTEnd = tEnd;
 
     return record;
+  }
+
+  /**
+   * Log one record per patient segment from parsed transcription.
+   * Each segment becomes a type="window" record with t_start, t_end, and features for that segment's text.
+   *
+   * @param {Array<{ tStart: number, tEnd: number, text: string, keywordAnalysis?: object, sentimentAnalysis?: object, semanticAnalysis?: object }>} segments - From parsePatientSegments() with optional analysis per segment
+   */
+  logPatientSegments(segments) {
+    if (!Array.isArray(segments) || segments.length === 0) return;
+    for (const seg of segments) {
+      const { tStart, tEnd, text, keywordAnalysis, sentimentAnalysis, semanticAnalysis } = seg;
+      const wordCount = (text || '').trim().split(/\s+/).filter(Boolean).length;
+      this.logWindow({
+        tStart,
+        tEnd,
+        wordCount,
+        keywordAnalysis: keywordAnalysis ?? null,
+        sentimentAnalysis: sentimentAnalysis ?? null,
+        semanticAnalysis: semanticAnalysis ?? null,
+      });
+    }
   }
 
   /**

@@ -13,7 +13,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { ArrowLeft, FileText, Brain, Loader2, UserPlus, CheckCircle, XCircle, Clock, Activity, Mic, MicOff } from "lucide-react";
 import { compareAllModels, getConsensusResult, analyzeKeywords, analyzeSentiment, analyzeSemantics, extractPatientText } from "@/services/aiService";
 import { transcriptionService } from "@/services/transcriptionService";
-import { AudioJsonlLogger, makeRelativeTimer } from "@/utils/jsonlLogger"; // ✅ new import
+import { AudioJsonlLogger, makeRelativeTimer, parsePatientSegments } from "@/utils/jsonlLogger";
 function formatTranscriptionForDisplay(text) {
   if (!text) return text;
   return text.replace(/Mic 1/g, "Patient").replace(/Mic 2/g, "Doctor");
@@ -350,18 +350,35 @@ export default function NewVisit() {
           patientId: selectedPatientId,
           t0,
         });
-        const patientText = extractPatientText(visitData.transcription) || visitData.transcription;
-        const keywordAnalysis   = analyzeKeywords(patientText);
-        const sentimentAnalysis = await analyzeSentiment(patientText);
-        const semanticAnalysis  = analyzeSemantics(patientText);
-        jsonlLoggerRef.current.logWindow({
-          tStart: 0,
-          tEnd: parseFloat((visitData.transcription.trim().split(/\s+/).length / 2.5).toFixed(3)),
-          wordCount: patientText.trim().split(/\s+/).length,
-          keywordAnalysis,
-          sentimentAnalysis,
-          semanticAnalysis,
-        });
+        const segments = parsePatientSegments(visitData.transcription);
+        if (segments.length > 0) {
+          // Log each patient-only timestamped segment with analysis
+          const segmentsWithAnalysis = await Promise.all(
+            segments.map(async ({ tStart, tEnd, text }) => ({
+              tStart,
+              tEnd,
+              text,
+              keywordAnalysis: analyzeKeywords(text),
+              sentimentAnalysis: await analyzeSentiment(text),
+              semanticAnalysis: analyzeSemantics(text),
+            }))
+          );
+          jsonlLoggerRef.current.logPatientSegments(segmentsWithAnalysis);
+        } else {
+          // Fallback: no timestamped patient lines — treat full patient text as one window
+          const patientText = extractPatientText(visitData.transcription) || visitData.transcription;
+          const keywordAnalysis   = analyzeKeywords(patientText);
+          const sentimentAnalysis = await analyzeSentiment(patientText);
+          const semanticAnalysis  = analyzeSemantics(patientText);
+          jsonlLoggerRef.current.logWindow({
+            tStart: 0,
+            tEnd: parseFloat((visitData.transcription.trim().split(/\s+/).length / 2.5).toFixed(3)),
+            wordCount: patientText.trim().split(/\s+/).length,
+            keywordAnalysis,
+            sentimentAnalysis,
+            semanticAnalysis,
+          });
+        }
       }
 
       if (jsonlLoggerRef.current) {
