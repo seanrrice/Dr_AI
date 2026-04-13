@@ -12,8 +12,12 @@ import wave
 import tempfile
 import subprocess
 import sys
+import base64
+import binascii
+from collections import Counter
 
 import json
+import cv2
 import shutil
 from pathlib import Path
 from datetime import datetime
@@ -55,6 +59,8 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 active_sessions = {}
 
 active_face_processes = {}
+active_face_sessions = {}
+_face_runtime = None
 
 # ====== Audio Helpers ======
 def save_wav_file(audio_data, samplerate, channels):
@@ -391,6 +397,77 @@ def cleanup_dead_face_processes():
     for visit_id in dead:
         active_face_processes.pop(visit_id, None)
 
+
+def get_face_runtime():
+    global _face_runtime
+    if _face_runtime is None:
+        repo_root = get_repo_root()
+        if str(repo_root) not in sys.path:
+            sys.path.insert(0, str(repo_root))
+        from emotion_pipeline.webcam_emotion_mediapipe import FrameEmotionAnalyzer, EMOTION_LABELS, MODEL_VERSION
+        from emotion_pipeline.emotion_logger_spec_v01 import EmotionVisitLogger
+        from common_utils.orchestrator_utils import update_manifest_status
+        _face_runtime = {
+            "FrameEmotionAnalyzer": FrameEmotionAnalyzer,
+            "EMOTION_LABELS": EMOTION_LABELS,
+            "MODEL_VERSION": MODEL_VERSION,
+            "EmotionVisitLogger": EmotionVisitLogger,
+            "update_manifest_status": update_manifest_status,
+            "analyzer": None,
+        }
+    return _face_runtime
+
+def get_face_analyzer():
+    runtime = get_face_runtime()
+    if runtime["analyzer"] is None:
+        runtime["analyzer"] = runtime["FrameEmotionAnalyzer"]()
+    return runtime["analyzer"]
+
+def ensure_visit_manifest(visit_id: str, patient_id: str = "") -> Path:
+    visit_dir = RUNS_DIR / f"visit_{visit_id}"
+    visit_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_path = visit_dir / "manifest.json"
+    if not manifest_path.exists():
+        manifest = {
+            "schema_version": "v0.1",
+            "visit_id": visit_id,
+            "patient_id": patient_id,
+            "created_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "expected_subsystems": ["audio", "face", "gait"],
+            "status": {"audio": "pending", "face": "pending", "gait": "pending"},
+        }
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+    return visit_dir
+
+def get_visit_t0_from_manifest(visit_dir: Path) -> float:
+    manifest_path = visit_dir / "manifest.json"
+    if manifest_path.exists():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            t0_str = manifest.get("created_utc")
+            if t0_str:
+                return datetime.strptime(t0_str, "%Y-%m-%dT%H:%M:%SZ").timestamp()
+        except Exception:
+            pass
+    return time.time()
+
+def decode_base64_image(data_url: str):
+    if not data_url:
+        raise ValueError("Missing image data")
+    payload = data_url.split(",", 1)[1] if "," in data_url else data_url
+    try:
+        raw = base64.b64decode(payload)
+    except binascii.Error as e:
+        raise ValueError(f"Invalid base64 image: {e}") from e
+    arr = np.frombuffer(raw, dtype=np.uint8)
+    frame = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if frame is None:
+        raise ValueError("Could not decode image")
+    return frame
+
+
 # ====== Flask API ======
 @app.route('/api/transcription/start', methods=['POST'])
 def start_transcription():
@@ -468,6 +545,7 @@ def handle_connect():
 def handle_disconnect():
     print('Client disconnected')
 
+
 #=======Face Analysis Endpoints =========
 
 @app.route('/api/face/start', methods=['POST'])
@@ -477,38 +555,65 @@ def start_face_analysis():
     data = request.get_json(silent=True) or {}
     visit_id = data.get("visit_id")
     patient_id = data.get("patient_id")
+    source = data.get("source", "gui")
 
     if not visit_id or not patient_id:
         return jsonify({"error": "visit_id and patient_id are required"}), 400
 
+    # GUI mode: browser owns the camera, backend only analyzes frames
+    if source == "gui":
+        visit_dir = ensure_visit_manifest(visit_id, patient_id)
+
+        if visit_id in active_face_sessions:
+            return jsonify({
+                "status": "ok",
+                "visit_id": visit_id,
+                "mode": "gui",
+                "message": "Face analysis already running"
+            })
+
+        try:
+            runtime = get_face_runtime()
+            runtime["update_manifest_status"](visit_dir, "face", "running")
+        except Exception as e:
+            return jsonify({"error": f"Face runtime unavailable: {e}"}), 500
+
+        active_face_sessions[visit_id] = {
+            "visit_id": visit_id,
+            "patient_id": patient_id,
+            "visit_dir": visit_dir,
+            "started_abs": time.time(),
+            "t0_abs": get_visit_t0_from_manifest(visit_dir),
+            "emotion_counts": Counter(),
+            "total_samples": 0,
+            "latest": {
+                "emotion": None,
+                "confidence": 0.0,
+                "box": None,
+                "detected": False,
+            },
+        }
+
+        return jsonify({
+            "status": "ok",
+            "visit_id": visit_id,
+            "mode": "gui",
+            "message": "Face analysis started"
+        })
+
+    # Legacy subprocess mode preserved for old workflows
     if visit_id in active_face_processes:
         proc = active_face_processes[visit_id]
         if proc.poll() is None:
             return jsonify({"error": f"Face analysis already running for visit {visit_id}"}), 400
         active_face_processes.pop(visit_id, None)
 
-    visit_dir = RUNS_DIR / f"visit_{visit_id}"
-    visit_dir.mkdir(parents=True, exist_ok=True)
-
-    manifest_path = visit_dir / "manifest.json"
-    if not manifest_path.exists():
-        manifest = {
-            "schema_version": "v0.1",
-            "visit_id": visit_id,
-            "patient_id": patient_id,
-            "created_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "expected_subsystems": ["audio", "face", "gait"],
-            "status": {"audio": "pending", "face": "pending", "gait": "pending"},
-        }
-        with open(manifest_path, "w", encoding="utf-8") as f:
-            json.dump(manifest, f, indent=2)
-
+    visit_dir = ensure_visit_manifest(visit_id, patient_id)
     face_script = get_face_script_path()
     if not face_script.exists():
         return jsonify({"error": f"Face script not found: {face_script}"}), 500
 
     python_exe = get_face_python_executable()
-
     cmd = [
         python_exe,
         str(face_script),
@@ -522,17 +627,64 @@ def start_face_analysis():
             cmd,
             cwd=str(get_repo_root()),
         )
-
         active_face_processes[visit_id] = proc
         print(f"[Face] Started face analysis for visit {visit_id}: {' '.join(cmd)}")
         return jsonify({
             "status": "ok",
             "visit_id": visit_id,
             "pid": proc.pid,
+            "mode": "subprocess",
             "message": "Face analysis started"
         })
     except Exception as e:
         return jsonify({"error": f"Failed to start face analysis: {e}"}), 500
+
+
+@app.route('/api/face/analyze-frame', methods=['POST'])
+def analyze_face_frame():
+    data = request.get_json(silent=True) or {}
+    visit_id = data.get("visit_id")
+    image_data = data.get("image")
+
+    if not visit_id:
+        return jsonify({"error": "visit_id is required"}), 400
+
+    session = active_face_sessions.get(visit_id)
+    if not session:
+        return jsonify({"error": f"No active GUI face analysis for visit {visit_id}"}), 404
+
+    try:
+        frame = decode_base64_image(image_data)
+        analyzer = get_face_analyzer()
+        result = analyzer.analyze_frame(frame)
+
+        if result.get("should_count") and result.get("smoothed_label"):
+            label = result["smoothed_label"]
+            session["emotion_counts"][label] += 1
+            session["total_samples"] += 1
+
+        emotion = result.get("smoothed_label") or result.get("label")
+        session["latest"] = {
+            "emotion": emotion,
+            "confidence": float(result.get("confidence") or 0.0),
+            "box": result.get("box"),
+            "detected": bool(result.get("detected")),
+        }
+
+        return jsonify({
+            "status": "ok",
+            "visit_id": visit_id,
+            "running": True,
+            "detected": bool(result.get("detected")),
+            "emotion": emotion,
+            "confidence": float(result.get("confidence") or 0.0),
+            "box": result.get("box"),
+            "counts": dict(session["emotion_counts"]),
+            "total_samples": int(session["total_samples"]),
+            "labels": get_face_runtime()["EMOTION_LABELS"],
+        })
+    except Exception as e:
+        return jsonify({"error": f"Frame analysis failed: {e}"}), 500
 
 
 @app.route('/api/face/stop', methods=['POST'])
@@ -545,6 +697,52 @@ def stop_face_analysis():
     if not visit_id:
         return jsonify({"error": "visit_id is required"}), 400
 
+    # GUI session stop
+    session = active_face_sessions.get(visit_id)
+    if session:
+        try:
+            runtime = get_face_runtime()
+            visit_dir = session["visit_dir"]
+            face_end_abs = time.time()
+            logger = runtime["EmotionVisitLogger"](
+                runs_dir=str(RUNS_DIR),
+                emotion_labels=runtime["EMOTION_LABELS"],
+                metadata_fields=["patient_id", "visit_label"],
+                model_version=runtime["MODEL_VERSION"],
+            )
+
+            t_start = session["started_abs"] - session["t0_abs"]
+            t_end = face_end_abs - session["t0_abs"]
+
+            if session["total_samples"] > 0:
+                logger.log_visit(
+                    emotion_counts=session["emotion_counts"],
+                    total_samples=session["total_samples"],
+                    visit_id=visit_id,
+                    visit_duration=(face_end_abs - session["started_abs"]),
+                    t_start=t_start,
+                    t_end=t_end,
+                    meta={
+                        "patient_id": session["patient_id"],
+                        "visit_label": datetime.utcnow().date().isoformat(),
+                    },
+                )
+
+            runtime["update_manifest_status"](visit_dir, "face", "done")
+            active_face_sessions.pop(visit_id, None)
+
+            return jsonify({
+                "status": "ok",
+                "visit_id": visit_id,
+                "mode": "gui",
+                "message": "Face analysis stopped",
+                "counts": dict(session["emotion_counts"]),
+                "total_samples": int(session["total_samples"]),
+            })
+        except Exception as e:
+            return jsonify({"error": f"Failed to stop GUI face analysis: {e}"}), 500
+
+    # Legacy subprocess stop
     proc = active_face_processes.get(visit_id)
     if not proc:
         return jsonify({"error": f"No active face analysis for visit {visit_id}"}), 404
@@ -552,12 +750,9 @@ def stop_face_analysis():
     try:
         visit_dir = RUNS_DIR / f"visit_{visit_id}"
         stop_file = visit_dir / "stop_face.txt"
-
-        # Ask the face script to exit gracefully
         stop_file.write_text("stop", encoding="utf-8")
         print(f"[Face] Stop signal written for visit {visit_id}")
 
-        # Give the process a few seconds to exit cleanly
         if proc.poll() is None:
             try:
                 proc.wait(timeout=8)
@@ -568,7 +763,7 @@ def stop_face_analysis():
 
         active_face_processes.pop(visit_id, None)
         print(f"[Face] Stopped face analysis for visit {visit_id}")
-        return jsonify({"status": "ok", "visit_id": visit_id, "message": "Face analysis stopped"})
+        return jsonify({"status": "ok", "visit_id": visit_id, "message": "Face analysis stopped", "mode": "subprocess"})
     except Exception as e:
         return jsonify({"error": f"Failed to stop face analysis: {e}"}), 500
 
@@ -581,6 +776,17 @@ def get_face_analysis_status():
     if not visit_id:
         return jsonify({"error": "visit_id is required"}), 400
 
+    session = active_face_sessions.get(visit_id)
+    if session:
+        return jsonify({
+            "visit_id": visit_id,
+            "running": True,
+            "mode": "gui",
+            "counts": dict(session["emotion_counts"]),
+            "total_samples": int(session["total_samples"]),
+            "latest": session["latest"],
+        })
+
     proc = active_face_processes.get(visit_id)
     is_running = proc is not None and proc.poll() is None
 
@@ -588,9 +794,11 @@ def get_face_analysis_status():
         "visit_id": visit_id,
         "running": is_running,
         "pid": proc.pid if is_running else None,
+        "mode": "subprocess" if is_running else None,
     })
 
 # ====== Visit Management Endpoints ======
+
 
 RUNS_DIR = Path("runs")
 
