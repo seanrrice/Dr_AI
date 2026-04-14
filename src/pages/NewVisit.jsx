@@ -72,6 +72,10 @@ export default function NewVisit() {
   const [isFaceRunning, setIsFaceRunning] = useState(false);
   const [faceError, setFaceError] = useState(null);
   const [cameraIndex, setCameraIndex] = useState("1");
+  const [faceStats, setFaceStats] = useState({ latestLabel: null, totalSamples: 0, avgLatencyMs: null, requestCount: 0 });
+  const faceCaptureCanvasRef = useRef(null);
+  const faceAnalyzeTimerRef = useRef(null);
+  const faceRequestInFlightRef = useRef(false);
 
   // Gait refs/state
   const [isGaitRunning, setIsGaitRunning] = useState(false);
@@ -129,6 +133,10 @@ export default function NewVisit() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ visit_id: selectedPatientId })
           }).catch(() => {});
+        }
+        if (faceAnalyzeTimerRef.current) {
+          clearInterval(faceAnalyzeTimerRef.current);
+          faceAnalyzeTimerRef.current = null;
         }
 
         if (isGaitRunning) {
@@ -216,6 +224,66 @@ export default function NewVisit() {
   };
 
   //====== Face analysis handlers =====================
+  const startFaceSamplingLoop = () => {
+    if (faceAnalyzeTimerRef.current) return;
+    const ANALYSIS_INTERVAL_MS = 800; // ~1.25 fps backend analysis
+
+    faceAnalyzeTimerRef.current = setInterval(async () => {
+      if (!selectedPatientId) return;
+      if (faceRequestInFlightRef.current) return;
+
+      const video = video2Ref.current;
+      if (!video || video.readyState < 2) return;
+
+      try {
+        if (!faceCaptureCanvasRef.current) {
+          faceCaptureCanvasRef.current = document.createElement("canvas");
+        }
+        const canvas = faceCaptureCanvasRef.current;
+        const ctx = canvas.getContext("2d", { willReadFrequently: false });
+        const targetW = 320;
+        const targetH = 240;
+        canvas.width = targetW;
+        canvas.height = targetH;
+        ctx.drawImage(video, 0, 0, targetW, targetH);
+        const image = canvas.toDataURL("image/jpeg", 0.65);
+
+        faceRequestInFlightRef.current = true;
+        const res = await fetch("http://localhost:5000/api/face/analyze-frame", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            visit_id: selectedPatientId,
+            image,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.error || "Face frame analysis failed");
+        }
+
+        const topDetection = (data.detections || [])[0];
+        setFaceStats({
+          latestLabel: topDetection?.label || null,
+          totalSamples: data.total_samples || 0,
+          avgLatencyMs: data.avg_latency_ms ?? null,
+          requestCount: data.request_count || 0,
+        });
+      } catch (err) {
+        console.warn("Face analyze-frame warning:", err.message);
+      } finally {
+        faceRequestInFlightRef.current = false;
+      }
+    }, ANALYSIS_INTERVAL_MS);
+  };
+
+  const stopFaceSamplingLoop = () => {
+    if (faceAnalyzeTimerRef.current) {
+      clearInterval(faceAnalyzeTimerRef.current);
+      faceAnalyzeTimerRef.current = null;
+    }
+    faceRequestInFlightRef.current = false;
+  };
 
   const handleStartFace = async () => {
   if (!selectedPatientId) {
@@ -225,6 +293,10 @@ export default function NewVisit() {
 
   try {
     setFaceError(null);
+    if (!camerasActive) {
+      await startCameras();
+    }
+    setFaceStats({ latestLabel: null, totalSamples: 0, avgLatencyMs: null, requestCount: 0 });
 
     // Ensure visit folder exists before launching face pipeline
     await fetch(`http://localhost:5000/api/visits/${selectedPatientId}/create`, {
@@ -241,7 +313,7 @@ export default function NewVisit() {
       body: JSON.stringify({
         visit_id: selectedPatientId,
         patient_id: selectedPatientId,
-        camera_index: Number(cameraIndex),
+        log_interval_sec: 0.8,
       })
     });
 
@@ -251,10 +323,12 @@ export default function NewVisit() {
     }
 
     setIsFaceRunning(true);
+    startFaceSamplingLoop();
   } catch (err) {
     console.error(err);
     setFaceError(err.message || 'Failed to start facial analysis');
     setIsFaceRunning(false);
+    stopFaceSamplingLoop();
   }
 };
 
@@ -272,6 +346,7 @@ const handleStopFace = async () => {
     }
 
     setIsFaceRunning(false);
+    stopFaceSamplingLoop();
   } catch (err) {
     console.error(err);
     setFaceError(err.message || 'Failed to stop facial analysis');
@@ -1005,8 +1080,16 @@ const handleStopFace = async () => {
                 </div>
 
                 <p className="text-xs text-gray-600">
-                  Camera preview is local to the browser. Face analysis runs in the Python backend and writes results into the visit folder.
+                  Camera preview stays in-browser. The app samples compressed frames (~1.25 fps) for backend analysis and skips new sends while a request is in flight.
                 </p>
+                {isFaceRunning && (
+                  <div className="text-xs text-slate-700 bg-slate-50 rounded p-3 space-y-1">
+                    <div><strong>Latest:</strong> {faceStats.latestLabel || "No face detected"}</div>
+                    <div><strong>Samples logged:</strong> {faceStats.totalSamples}</div>
+                    <div><strong>Avg backend latency:</strong> {faceStats.avgLatencyMs != null ? `${faceStats.avgLatencyMs} ms` : "N/A"}</div>
+                    <div><strong>Frames analyzed:</strong> {faceStats.requestCount}</div>
+                  </div>
+                )}
 
                 {faceError && (
                   <p className="text-xs text-red-600">{faceError}</p>
