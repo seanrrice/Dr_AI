@@ -11,12 +11,12 @@ import os
 import wave
 import tempfile
 import subprocess
-import sys
 
 import json
 import shutil
 from pathlib import Path
 from datetime import datetime
+from emotion_pipeline.face_runtime import FaceAnalysisSession, VisitContext, decode_data_url_image
 
 # Optional: use faster_whisper if installed
 try:
@@ -55,6 +55,7 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 active_sessions = {}
 
 active_face_processes = {}
+active_face_sessions = {}
 
 # ====== Audio Helpers ======
 def save_wav_file(audio_data, samplerate, channels):
@@ -376,14 +377,7 @@ class TranscriptionSession:
 def get_repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
-def get_face_script_path() -> Path:
-    return get_repo_root() / "emotion_pipeline" / "webcam_emotion_mediapipe.py"
-
-def get_face_python_executable() -> str:
-    # Optional override if the face pipeline needs a different venv
-    return os.environ.get("FACE_PYTHON_EXE", sys.executable)
-
-def cleanup_dead_face_processes():
+def cleanup_face_state():
     dead = []
     for visit_id, proc in active_face_processes.items():
         if proc.poll() is not None:
@@ -472,21 +466,19 @@ def handle_disconnect():
 
 @app.route('/api/face/start', methods=['POST'])
 def start_face_analysis():
-    cleanup_dead_face_processes()
+    cleanup_face_state()
 
     data = request.get_json(silent=True) or {}
     visit_id = data.get("visit_id")
     patient_id = data.get("patient_id")
-    camera_index = int(data.get("camera_index", 1))  # change default to 0 if want to use laptop webcam
+    visit_label = data.get("visit_label") or datetime.utcnow().date().isoformat()
+    log_interval_sec = float(data.get("log_interval_sec", 0.5))
 
     if not visit_id or not patient_id:
         return jsonify({"error": "visit_id and patient_id are required"}), 400
 
-    if visit_id in active_face_processes:
-        proc = active_face_processes[visit_id]
-        if proc.poll() is None:
-            return jsonify({"error": f"Face analysis already running for visit {visit_id}"}), 400
-        active_face_processes.pop(visit_id, None)
+    if visit_id in active_face_sessions:
+        return jsonify({"error": f"Face analysis already running for visit {visit_id}"}), 400
 
     visit_dir = RUNS_DIR / f"visit_{visit_id}"
     visit_dir.mkdir(parents=True, exist_ok=True)
@@ -504,42 +496,56 @@ def start_face_analysis():
         with open(manifest_path, "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)
 
-    face_script = get_face_script_path()
-    if not face_script.exists():
-        return jsonify({"error": f"Face script not found: {face_script}"}), 500
-
-    python_exe = get_face_python_executable()
-
-    cmd = [
-        python_exe,
-        str(face_script),
-        "--visit_id", str(visit_id),
-        "--patient_id", str(patient_id),
-        "--runs_dir", str(RUNS_DIR.resolve()),
-        "--camera_index", str(camera_index),
-    ]
-
     try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(get_repo_root()),
+        active_face_sessions[visit_id] = FaceAnalysisSession(
+            context=VisitContext(
+                visit_id=str(visit_id),
+                patient_id=str(patient_id),
+                visit_label=str(visit_label),
+                runs_dir=RUNS_DIR,
+            ),
+            log_interval_sec=log_interval_sec,
         )
-
-        active_face_processes[visit_id] = proc
-        print(f"[Face] Started face analysis for visit {visit_id}: {' '.join(cmd)}")
+        print(f"[Face] Started integrated face analysis session for visit {visit_id}")
         return jsonify({
             "status": "ok",
             "visit_id": visit_id,
-            "pid": proc.pid,
-            "message": "Face analysis started"
+            "message": "Face analysis started",
+            "mode": "integrated-frame-api",
         })
     except Exception as e:
         return jsonify({"error": f"Failed to start face analysis: {e}"}), 500
 
 
+@app.route('/api/face/analyze-frame', methods=['POST'])
+def analyze_face_frame():
+    data = request.get_json(silent=True) or {}
+    visit_id = data.get("visit_id")
+    image_b64 = data.get("image")
+
+    if not visit_id:
+        return jsonify({"error": "visit_id is required"}), 400
+    if not image_b64:
+        return jsonify({"error": "image is required"}), 400
+
+    session = active_face_sessions.get(visit_id)
+    if not session:
+        return jsonify({"error": f"No active face analysis session for visit {visit_id}"}), 404
+
+    try:
+        frame = decode_data_url_image(image_b64)
+        if frame is None:
+            return jsonify({"error": "Unable to decode frame"}), 400
+        result = session.analyze_frame(frame)
+        return jsonify(result)
+    except Exception as e:
+        print(f"[Face] analyze-frame error: {e}")
+        return jsonify({"error": f"Failed to analyze frame: {e}"}), 500
+
+
 @app.route('/api/face/stop', methods=['POST'])
 def stop_face_analysis():
-    cleanup_dead_face_processes()
+    cleanup_face_state()
 
     data = request.get_json(silent=True) or {}
     visit_id = data.get("visit_id")
@@ -547,6 +553,17 @@ def stop_face_analysis():
     if not visit_id:
         return jsonify({"error": "visit_id is required"}), 400
 
+    # Stop integrated API session first
+    session = active_face_sessions.pop(visit_id, None)
+    if session:
+        try:
+            summary = session.finalize()
+            print(f"[Face] Stopped integrated face analysis for visit {visit_id}")
+            return jsonify({"status": "ok", "visit_id": visit_id, "message": "Face analysis stopped", "summary": summary})
+        except Exception as e:
+            return jsonify({"error": f"Failed to stop face analysis: {e}"}), 500
+
+    # Backward-compatible fallback for legacy subprocess mode
     proc = active_face_processes.get(visit_id)
     if not proc:
         return jsonify({"error": f"No active face analysis for visit {visit_id}"}), 404
@@ -577,11 +594,21 @@ def stop_face_analysis():
 
 @app.route('/api/face/status', methods=['GET'])
 def get_face_analysis_status():
-    cleanup_dead_face_processes()
+    cleanup_face_state()
 
     visit_id = request.args.get("visit_id")
     if not visit_id:
         return jsonify({"error": "visit_id is required"}), 400
+
+    session = active_face_sessions.get(visit_id)
+    if session:
+        return jsonify({
+            "visit_id": visit_id,
+            "running": True,
+            "mode": "integrated-frame-api",
+            "request_count": session.request_count,
+            "total_samples": session.total_samples,
+        })
 
     proc = active_face_processes.get(visit_id)
     is_running = proc is not None and proc.poll() is None
