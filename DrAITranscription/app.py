@@ -16,7 +16,7 @@ import json
 import shutil
 from pathlib import Path
 from datetime import datetime
-from emotion_pipeline.face_runtime import FaceAnalysisSession, VisitContext, decode_data_url_image
+import importlib.util
 
 # Ensure repo-root imports work when launching from DrAITranscription/
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -24,7 +24,31 @@ REPO_ROOT = CURRENT_DIR.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from emotion_pipeline.face_runtime import FaceAnalysisSession, VisitContext, decode_data_url_image
+def _load_face_runtime():
+    """
+    Load face runtime without depending on package-style imports only.
+    This avoids startup issues when app.py is run from different working directories.
+    """
+    candidate_paths = [
+        REPO_ROOT / "emotion_pipeline" / "face_runtime.py",
+        CURRENT_DIR / "emotion_pipeline" / "face_runtime.py",
+    ]
+    runtime_path = next((p for p in candidate_paths if p.exists()), None)
+    if runtime_path is None:
+        tried = ", ".join(str(p) for p in candidate_paths)
+        raise ModuleNotFoundError(f"Could not locate face_runtime.py. Checked: {tried}")
+
+    spec = importlib.util.spec_from_file_location("doctor_ai_face_runtime", runtime_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Failed to build import spec for {runtime_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+_face_runtime = _load_face_runtime()
+FaceAnalysisSession = _face_runtime.FaceAnalysisSession
+VisitContext = _face_runtime.VisitContext
+decode_data_url_image = _face_runtime.decode_data_url_image
 
 # Optional: use faster_whisper if installed
 try:
