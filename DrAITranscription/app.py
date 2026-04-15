@@ -18,6 +18,14 @@ from pathlib import Path
 from datetime import datetime
 from emotion_pipeline.face_runtime import FaceAnalysisSession, VisitContext, decode_data_url_image
 
+# Ensure repo-root imports work when launching from DrAITranscription/
+CURRENT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = CURRENT_DIR.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from emotion_pipeline.face_runtime import FaceAnalysisSession, VisitContext, decode_data_url_image
+
 # Optional: use faster_whisper if installed
 try:
     from faster_whisper import WhisperModel
