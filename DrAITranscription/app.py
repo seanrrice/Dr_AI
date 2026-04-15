@@ -11,7 +11,6 @@ import os
 import wave
 import tempfile
 import subprocess
-import sys
 
 import json
 import shutil
