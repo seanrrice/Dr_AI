@@ -190,12 +190,12 @@ export const api = {
 /** Seeded demo patients — same ids as `reportSummaryDemoData` for report wiring. */
 const SEED_PATIENT_DEMO_1 = {
   id: 'patient-demo-1',
-  first_name: 'Michael',
-  last_name: 'Reyes',
-  date_of_birth: '1962-09-21',
-  gender: 'male',
-  medical_record_number: 'MRN-CC-2048',
-  primary_diagnosis: 'Suspected Parkinson disease',
+  first_name: 'Elena',
+  last_name: 'Brooks',
+  date_of_birth: '1974-09-21',
+  gender: 'female',
+  medical_record_number: 'MRN-RS-2048',
+  primary_diagnosis: 'Exertional shortness of breath under treatment (improving)',
   created_date: '2025-01-15T10:00:00Z',
   updated_date: '2025-01-15T10:00:00Z',
 };
@@ -212,7 +212,7 @@ const SEED_PATIENT_DEMO_2 = {
   updated_date: '2025-10-01T10:00:00Z',
 };
 
-/** Four visits for Michael Reyes — ids and vitals match `demoSerialVisitSnapshots` (serial trend page). */
+/** Four visits for the breathing-recovery demo patient — ids and vitals match `demoSerialVisitSnapshots`. */
 const MICHAEL_SERIAL_VISITS_SEED = buildMichaelSerialStorageVisits();
 
 const snap2 = demoVisitSnapshot2;
@@ -296,7 +296,16 @@ function healCanonicalDemoRows() {
       return;
     }
     const cur = visits[idx];
-    if (cur.patient_id !== seed.patient_id || cur.chief_complaint !== seed.chief_complaint || cur.visit_date !== seed.visit_date) {
+    const needsRewrite =
+      cur.patient_id !== seed.patient_id ||
+      cur.chief_complaint !== seed.chief_complaint ||
+      cur.visit_date !== seed.visit_date ||
+      cur.transcription !== seed.transcription ||
+      JSON.stringify(cur.keyword_analysis || {}) !== JSON.stringify(seed.keyword_analysis || {}) ||
+      JSON.stringify(cur.sentiment_analysis || {}) !== JSON.stringify(seed.sentiment_analysis || {}) ||
+      JSON.stringify(cur.semantic_analysis || {}) !== JSON.stringify(seed.semantic_analysis || {});
+
+    if (needsRewrite) {
       visits[idx] = { ...seed };
       changed = true;
     }

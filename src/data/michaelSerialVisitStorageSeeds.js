@@ -1,48 +1,53 @@
 /**
- * Full Visit-shaped rows for Michael Reyes (patient-demo-1) aligned with
- * `demoSerialVisitSnapshots` in reportSerialTrendDemoData.js — same ids and timeline.
+ * Full Visit-shaped rows for the primary serial-trend demo patient (patient-demo-1),
+ * aligned with `demoSerialVisitSnapshots` — same ids and recovery timeline.
  */
 import { demoSerialVisitSnapshots } from "@/data/reportSerialTrendDemoData";
 
 const TRANSCRIPTIONS = [
-  `I've noticed a slight shake in my right hand when it's resting on my lap for the past few months. Walking feels a little slower than before but I can still do my usual walks. No falls. Sleep has been okay. I'm not on any Parkinson medications yet.`,
-  `The tremor is more obvious now and my legs feel stiff, especially in the morning. Turning when I walk is harder and I have to take smaller steps. I'm more tired by the afternoon. Still driving short distances. Family says I'm not swinging my right arm as much when I walk.`,
-  `The resting tremor in my right hand is much more noticeable. I'm slower getting up from a chair, turning takes several steps, and my wife says I shuffle. My handwriting has gotten smaller, my voice is softer, and I'm wiped out after routine housework. No falls yet but I'm nervous about balance.`,
-  `I saw neurology since last time. We're adjusting medication timing. Tremor is still there but I'm a bit steadier on flat ground. Stiffness is ongoing. I had one near-trip on a curb but caught myself. I want to focus on staying active safely and knowing what to watch for.`,
+  `Doctor: What breathing changes have you noticed since your symptoms began, and what activities trigger the worst episodes?
+Patient: For the last couple of months I get short of breath doing things that used to be easy. Climbing one flight of stairs makes me stop halfway to catch my breath, and carrying groceries in from the car can make me pause for one to two minutes. I notice the breathlessness most in the evening and when I walk quickly. I also have an intermittent dry cough and occasional mild wheeze. Lying flat feels uncomfortable, so I have been sleeping with two pillows. The symptoms are affecting my routine because I avoid stairs, park closer to entrances, and feel anxious when I get winded.
+`,
+  `Doctor: How are you doing since starting treatment and breathing exercises?
+Patient: The inhaler and breathing exercises are helping. I still get shortness of breath on stairs, but I recover faster and the cough is less frequent.`,
+  `Doctor: Compared with last visit, what has improved and what still limits you?
+Patient: Breathing is noticeably better. I can walk longer distances now and only feel mild shortness of breath if I push myself uphill or carry something heavy.`,
+  `Doctor: How close are you to your usual baseline activity now?
+Patient: I feel close to normal again. I can manage stairs without stopping most days, and shortness of breath only shows up with heavier exertion.`,
 ];
 
 const PHYSICIAN_NOTES = [
-  "Baseline exam: mild asymmetric resting tremor, subtle bradykinesia. Discussed prognosis and follow-up plan.",
-  "Progressive motor features; discussed escalation of care and objective motor scales.",
-  "Clear parkinsonian syndrome picture; counseling on therapy options and fall risk.",
-  "Post-initiation follow-up: review med timing, PT referral, safety counseling.",
+  "Initial respiratory evaluation: exertional shortness of breath prominent, dry cough and mild wheeze reported. Started treatment plan and close follow-up.",
+  "Early improvement noted with fewer shortness-of-breath episodes and better recovery after exertion.",
+  "Functional tolerance improving; residual symptoms now limited to heavier exertion.",
+  "Recovery-focused follow-up: near-baseline breathing with low residual symptom burden.",
 ];
 
+const KEYWORD_SERIES = [
+  { breathlessness: 10, breath: 8, wheeze: 6, cough: 5 },
+  { breathlessness: 6, breath: 5, wheeze: 3, cough: 2 },
+  { breathlessness: 3, breath: 2, wheeze: 2, cough: 1 },
+  { breathlessness: 1, breath: 1, wheeze: 1, cough: 0 },
+];
+
+const TOTAL_WORDS = [146, 52, 38, 31];
+
 function keywordFromSnapshot(_s, idx) {
-  const counts = {
-    tremor: 2 + idx,
-    slow: 2 + Math.min(1, idx),
-    stiff: 2,
-    walking: 2,
-    balance: 1 + idx,
-    rigidity: 1 + Math.floor(idx / 2),
-    bradykinesia: idx >= 2 ? 2 : 1,
-    gait: idx >= 1 ? 2 : 1,
-  };
-  const totalWords = 55 + idx * 12;
-  const kwPct = 22 + idx * 2.5;
+  const counts = KEYWORD_SERIES[idx] || {};
   const top = Object.entries(counts)
+    .filter(([, count]) => count > 0)
     .sort((a, b) => b[1] - a[1])
-    .slice(0, 6)
+    .slice(0, 4)
     .map(([word, count]) => ({
       word,
       count,
-      category: word === "tremor" || word === "bradykinesia" ? "NEUROLOGIC" : "MOTOR",
+      category: word === "cough" ? "RESPIRATORY" : "DYSPNEA",
     }));
+  const keywordTotal = Object.values(counts).reduce((sum, count) => sum + count, 0);
   return {
-    total_words: totalWords,
+    total_words: TOTAL_WORDS[idx] || 40,
     diagnostic_keywords: counts,
-    keyword_percentage: Math.min(38, Math.round(kwPct * 10) / 10),
+    keyword_percentage: Math.round((keywordTotal / (TOTAL_WORDS[idx] || 40)) * 1000) / 10,
     top_keywords: top,
   };
 }
@@ -54,24 +59,26 @@ function sentimentFromSnapshot(s) {
     sentiment_score: score,
     distress_level: score <= -0.45 ? "high" : score <= -0.28 ? "medium" : "low",
     emotional_indicators:
-      score <= -0.4
-        ? ["worry", "fatigue", "frustration", "mobility concern"]
-        : ["concern", "fatigue", "adjusting to symptoms"],
+      score <= -0.35
+        ? ["worry", "fatigue", "air hunger", "activity limitation"]
+        : score < 0
+          ? ["cautious optimism", "mild fatigue", "symptom monitoring"]
+          : ["relief", "confidence", "improving stamina"],
   };
 }
 
 function semanticFromSnapshot(s, idx) {
   return {
     key_themes: [
-      "resting tremor",
-      "bradykinesia",
-      idx >= 2 ? "postural instability" : "gait change",
-      "rigidity",
-      idx >= 3 ? "treatment adjustment" : "functional impact",
+      "shortness of breath on exertion",
+      idx <= 1 ? "activity intolerance" : "functional recovery",
+      idx <= 1 ? "dry cough" : "improving respiratory symptoms",
+      idx >= 2 ? "staged return to activity" : "treatment response",
+      "serial monitoring benefit",
     ],
-    symptom_severity: idx <= 1 ? "mild to moderate" : "moderate",
-    functional_impact: idx <= 1 ? "mild ADL impact" : "moderate ADL and mobility impact",
-    temporal_patterns: "progressive over months",
+    symptom_severity: idx === 0 ? "moderate" : idx === 1 ? "mild to moderate" : idx === 2 ? "mild" : "minimal",
+    functional_impact: idx === 0 ? "stairs and errands limited" : idx === 1 ? "improving exercise tolerance" : idx === 2 ? "mostly preserved with heavier exertion limits" : "near-baseline activity tolerance",
+    temporal_patterns: idx <= 1 ? "Improving over weeks after treatment start" : "Continued improvement across serial follow-up",
   };
 }
 
@@ -80,21 +87,21 @@ function fullAiAssessment(s) {
   return {
     suggested_diagnoses: a.suggested_diagnoses,
     recommended_tests: [
-      "Comprehensive neurologic exam with motor scoring (e.g., UPDRS elements)",
-      "MRI brain if atypical features or red flags",
-      "CBC, CMP, TSH, B12 as clinically indicated",
-      "Gait and balance assessment with PT",
+      "Pulse oximetry trend review and ambulatory vitals",
+      "Chest imaging or spirometry if symptoms plateau or worsen",
+      "CBC, CMP, and targeted respiratory workup as clinically indicated",
+      "Functional exercise tolerance assessment",
     ],
     treatment_suggestions: [
-      "Coordinate care with neurology for medication and device planning",
-      "Physical therapy for gait, turns, and freezing strategies",
-      "Occupational therapy for fine motor and ADL tasks",
-      "Fall-risk mitigation and home safety review",
+      "Continue inhaler regimen and breathing exercises",
+      "Structured walking program with gradual activity progression",
+      "Reinforce trigger avoidance and pacing strategies",
+      "Escalate pulmonary evaluation only if recovery stalls",
     ],
     patient_education: [
-      "Track tremor, stiffness, walking speed, and freezing between visits",
-      "Maintain exercise, sleep, and hydration; avoid abrupt medication changes without guidance",
-      "Seek urgent care for sudden weakness, confusion, or repeated falls",
+      "Track shortness-of-breath episodes, recovery time, and exertion tolerance between visits",
+      "Use rescue medications as directed and pace activity increases gradually",
+      "Seek urgent care for worsening hypoxia, chest pain, or severe respiratory distress",
     ],
     follow_up_recommendations: a.follow_up_recommendations,
   };

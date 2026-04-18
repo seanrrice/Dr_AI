@@ -19,6 +19,9 @@ import { TrendingDown, TrendingUp } from "lucide-react";
  * Keyword + sentiment trend charts built from stored Visit rows (transcription / NLP fields).
  */
 export default function PatientNlpTrendCharts({ visits }) {
+  const TOP_DIAGNOSTIC_WORDS = 4;
+  const wordLineColors = ["#0d9488", "#2563eb", "#7c3aed", "#dc2626", "#ea580c", "#16a34a"];
+
   const keywordTrendData = useMemo(
     () =>
       (visits || []).map((visit) => ({
@@ -61,12 +64,51 @@ export default function PatientNlpTrendCharts({ visits }) {
       .map(([word, count]) => ({ word, count }));
   }, [visits]);
 
+  const diagnosticWordTrend = useMemo(() => {
+    if (!visits?.length) return { words: [], data: [] };
+
+    const totals = {};
+    (visits || []).forEach((visit) => {
+      const keywords = visit.keyword_analysis?.diagnostic_keywords || {};
+      Object.entries(keywords).forEach(([word, data]) => {
+        const count = typeof data === "object" && data !== null ? data.count : data;
+        totals[word] = (totals[word] || 0) + (typeof count === "number" ? count : 0);
+      });
+    });
+
+    const words = Object.entries(totals)
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, TOP_DIAGNOSTIC_WORDS)
+      .map(([w]) => w);
+
+    const data = (visits || []).map((visit) => {
+      const keywords = visit.keyword_analysis?.diagnostic_keywords || {};
+      const row = {
+        date: format(new Date(visit.visit_date), "MMM d"),
+        visit: `Visit ${visit.visit_number ?? "—"}`,
+      };
+      words.forEach((w) => {
+        const v = keywords[w];
+        const count = typeof v === "object" && v !== null ? v.count : v;
+        row[w] = typeof count === "number" ? count : 0;
+      });
+      return row;
+    });
+
+    return { words, data };
+  }, [visits]);
+
   if (!visits?.length) return null;
 
   const hasKeywordSeries = visits.some((v) => v.keyword_analysis);
   const hasSentimentSeries = visits.some((v) => v.sentiment_analysis);
 
-  if (!hasKeywordSeries && !hasSentimentSeries && topKeywords.length === 0) {
+  if (
+    !hasKeywordSeries &&
+    !hasSentimentSeries &&
+    topKeywords.length === 0 &&
+    diagnosticWordTrend.words.length === 0
+  ) {
     return (
       <p className="text-sm text-teal-700 py-2">
         No keyword or sentiment fields on stored visits yet — charts will appear when visit NLP data exists.
@@ -76,6 +118,42 @@ export default function PatientNlpTrendCharts({ visits }) {
 
   return (
     <div className="space-y-6">
+      {diagnosticWordTrend.words.length > 0 && (
+        <Card className="border-teal-200 bg-white/80 backdrop-blur">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-teal-900 text-base">
+              <TrendingUp className="w-5 h-5 text-teal-700" />
+              Top diagnostic words over time
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <ResponsiveContainer width="100%" height={320}>
+              <LineChart data={diagnosticWordTrend.data}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#ccfbf1" />
+                <XAxis dataKey="date" tick={{ fontSize: 11 }} />
+                <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
+                <Tooltip />
+                <Legend />
+                {diagnosticWordTrend.words.map((w, idx) => (
+                  <Line
+                    key={w}
+                    type="monotone"
+                    dataKey={w}
+                    stroke={wordLineColors[idx % wordLineColors.length]}
+                    strokeWidth={2}
+                    dot={{ r: 2 }}
+                    activeDot={{ r: 4 }}
+                  />
+                ))}
+              </LineChart>
+            </ResponsiveContainer>
+            <p className="text-xs text-teal-600 mt-3 text-center">
+              Tracks the most frequent diagnostic keywords (across all visits) and how often they appear per visit
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
       {hasKeywordSeries && (
         <Card className="border-teal-200 bg-white/80 backdrop-blur">
           <CardHeader>
