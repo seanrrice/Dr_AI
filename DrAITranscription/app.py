@@ -97,11 +97,14 @@ def format_timestamp(seconds):
 
 # ====== Transcription Session Class ======
 class TranscriptionSession:
-    def __init__(self):
+    def __init__(self, device_index=None, channels=2):
         self.is_running = False
         self.transcripts = []
         self.callback = None
         self.stream = None
+        self.device_index = device_index
+        self.channels_requested = channels if channels in (1, 2) else 2
+        self.active_channels = self.channels_requested
         self._audio_queue = queue.Queue()
         self._segment_queue = queue.Queue(maxsize=MAX_SEGMENT_QUEUE)
         self._transcript_lock = threading.Lock()
@@ -109,21 +112,41 @@ class TranscriptionSession:
         self._rms_ch1 = 0.0
         self._rms_ch2 = 0.0
 
-        # Load Whisper model if available
+        # Load Whisper model if available.
         self.model = None
         if WhisperModel:
+            model_size = os.environ.get("WHISPER_MODEL_SIZE", "small.en")
+            requested_device = os.environ.get("WHISPER_DEVICE", "cpu").strip().lower()
+            if requested_device not in ("cpu", "cuda"):
+                requested_device = "cuda"
+
             try:
-                self.model = WhisperModel("small.en", device="cuda", compute_type="int8")
+                if requested_device == "cuda":
+                    # GPU-first path with automatic CPU fallback if CUDA/cuDNN is unavailable.
+                    self.model = WhisperModel(model_size, device="cuda", compute_type="int8")
+                    print(f"[Session] Whisper loaded on CUDA ({model_size})")
+                else:
+                    self.model = WhisperModel(model_size, device="cpu", compute_type="int8")
+                    print(f"[Session] Whisper loaded on CPU ({model_size})")
             except Exception as e:
-                print(f"[Session] Failed to load Whisper model: {e}")
-                self.model = None
+                if requested_device == "cuda":
+                    print(f"[Session] CUDA Whisper init failed: {e}. Falling back to CPU.")
+                    try:
+                        self.model = WhisperModel(model_size, device="cpu", compute_type="int8")
+                        print(f"[Session] Whisper loaded on CPU fallback ({model_size})")
+                    except Exception as cpu_e:
+                        print(f"[Session] Failed to load Whisper model on CPU fallback: {cpu_e}")
+                        self.model = None
+                else:
+                    print(f"[Session] Failed to load Whisper model: {e}")
+                    self.model = None
 
     def _process_segment(self, audio_chunk, speech_start_time, speech_end_time, session_start, queue_wait=0.0):
         if np.mean(np.abs(audio_chunk)) < 1e-4:
             return
         if audio_chunk.ndim == 1 or audio_chunk.shape[1] == 1:
             if np.sqrt(np.mean(audio_chunk**2)) > RMS_THRESHOLD:
-                text = self.transcribe_audio(audio_chunk, "Mic 1",
+                text = self.transcribe_audio(audio_chunk, "",
                                              speech_start_time, speech_end_time, queue_wait=queue_wait)
                 if text:
                     with self._transcript_lock:
@@ -239,42 +262,81 @@ class TranscriptionSession:
     def start(self):
         self.is_running = True
         session_start = time.time()
-        device = DEVICE_INDEX
+        requested_channels = self.channels_requested
+        selected_device = self.device_index
+        device = selected_device if selected_device is not None else DEVICE_INDEX
         use_callback = USE_CALLBACK_CAPTURE
 
         # Try callback-based stream (required for device 24 on some Windows drivers)
         if use_callback:
-            for try_device in (DEVICE_INDEX, DEVICE_INDEX_FALLBACK):
+            devices_to_try = [device]
+            if selected_device is None and DEVICE_INDEX_FALLBACK not in devices_to_try:
+                devices_to_try.append(DEVICE_INDEX_FALLBACK)
+
+            for try_device in devices_to_try:
                 try:
-                    self.stream = sd.InputStream(
-                        device=try_device,
-                        samplerate=SAMPLE_RATE_CAPTURE,
-                        channels=CHANNELS,
-                        dtype='float32',
-                        blocksize=CHUNK,
-                        callback=self._capture_callback,
-                    )
-                    self.stream.start()
+                    try:
+                        self.stream = sd.InputStream(
+                            device=try_device,
+                            samplerate=SAMPLE_RATE_CAPTURE,
+                            channels=requested_channels,
+                            dtype='float32',
+                            blocksize=CHUNK,
+                            callback=self._capture_callback,
+                        )
+                        self.stream.start()
+                        self.active_channels = requested_channels
+                    except sd.PortAudioError:
+                        if requested_channels == 2:
+                            self.stream = sd.InputStream(
+                                device=try_device,
+                                samplerate=SAMPLE_RATE_CAPTURE,
+                                channels=1,
+                                dtype='float32',
+                                blocksize=CHUNK,
+                                callback=self._capture_callback,
+                            )
+                            self.stream.start()
+                            self.active_channels = 1
+                            print(f"[Session] Device {try_device} does not support stereo, using mono.")
+                        else:
+                            raise
+
                     device = try_device
-                    print(f"[Transcription] Started (PreSonus stereo, device {try_device}, callback mode)")
+                    print(f"[Transcription] Started (device {try_device}, channels={self.active_channels}, callback mode)")
                     break
                 except sd.PortAudioError as e:
-                    if try_device == DEVICE_INDEX:
-                        print(f"[Session] Device {try_device} failed: {e}, trying fallback {DEVICE_INDEX_FALLBACK}")
+                    if try_device != devices_to_try[-1]:
+                        print(f"[Session] Device {try_device} failed: {e}, trying fallback {devices_to_try[-1]}")
                     else:
                         print(f"[Session] Audio input error: {e}")
                         self.is_running = False
                         return
         else:
             try:
-                self.stream = sd.InputStream(
-                    device=device,
-                    samplerate=SAMPLE_RATE_CAPTURE,
-                    channels=CHANNELS,
-                    dtype='float32',
-                )
-                self.stream.start()
-                print(f"[Transcription] Started (Mic 1 = Ch1, Mic 2 = Ch2, device {device})")
+                try:
+                    self.stream = sd.InputStream(
+                        device=device,
+                        samplerate=SAMPLE_RATE_CAPTURE,
+                        channels=requested_channels,
+                        dtype='float32',
+                    )
+                    self.stream.start()
+                    self.active_channels = requested_channels
+                except sd.PortAudioError:
+                    if requested_channels == 2:
+                        self.stream = sd.InputStream(
+                            device=device,
+                            samplerate=SAMPLE_RATE_CAPTURE,
+                            channels=1,
+                            dtype='float32',
+                        )
+                        self.stream.start()
+                        self.active_channels = 1
+                        print(f"[Session] Device {device} does not support stereo, using mono.")
+                    else:
+                        raise
+                print(f"[Transcription] Started (device {device}, channels={self.active_channels})")
             except sd.PortAudioError as e:
                 print(f"[Session] Audio input error: {e}")
                 self.is_running = False
@@ -358,7 +420,7 @@ class TranscriptionSession:
             if text:
                 elapsed = time.perf_counter() - t0
                 total = SILENCE_DURATION + queue_wait + elapsed
-                line = f"[{start_stamp} -> {end_stamp}] {speaker_label}: {text}"
+                line = f"[{start_stamp} -> {end_stamp}] {speaker_label}: {text}" if speaker_label else f"[{start_stamp} -> {end_stamp}] {text}"
                 print(f"{NEON_GREEN}({elapsed:.1f} s transcribe, {total:.1f} s total): \"{text}\"{RESET_COLOR}\n")
                 return line
             return ""
@@ -396,11 +458,25 @@ def cleanup_dead_face_processes():
 def start_transcription():
     data = request.get_json(silent=True)
     session_id = (data or {}).get('session_id', 'default')
+    device_index_raw = (data or {}).get('device_index', None)
+    channels_raw = (data or {}).get('channels', 2)
+
+    try:
+        device_index = None if device_index_raw in (None, "", "default") else int(device_index_raw)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'device_index must be an integer or null'}), 400
+
+    try:
+        channels = int(channels_raw)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'channels must be 1 or 2'}), 400
+    if channels not in (1, 2):
+        return jsonify({'error': 'channels must be 1 or 2'}), 400
 
     if session_id in active_sessions:
         return jsonify({'error': 'Session already active'}), 400
 
-    session = TranscriptionSession()
+    session = TranscriptionSession(device_index=device_index, channels=channels)
     active_sessions[session_id] = session
 
     def on_transcription(text):
@@ -418,8 +494,28 @@ def start_transcription():
     return jsonify({
         'success': True,
         'session_id': session_id,
-        'message': 'Transcription started'
+        'message': 'Transcription started',
+        'channels': channels,
+        'device_index': device_index
     })
+
+@app.route('/api/transcription/devices', methods=['GET'])
+def list_transcription_devices():
+    try:
+        devices = sd.query_devices()
+        input_devices = []
+        for idx, dev in enumerate(devices):
+            max_input_channels = int(dev.get('max_input_channels', 0) or 0)
+            if max_input_channels > 0:
+                input_devices.append({
+                    'index': idx,
+                    'name': dev.get('name', f'Input {idx}'),
+                    'max_input_channels': max_input_channels,
+                    'default_samplerate': dev.get('default_samplerate')
+                })
+        return jsonify({'devices': input_devices})
+    except Exception as e:
+        return jsonify({'error': f'Failed to enumerate devices: {e}'}), 500
 
 @app.route('/api/transcription/stop', methods=['POST'])
 def stop_transcription():
@@ -477,7 +573,7 @@ def start_face_analysis():
     data = request.get_json(silent=True) or {}
     visit_id = data.get("visit_id")
     patient_id = data.get("patient_id")
-    camera_index = int(data.get("camera_index", 1))  # change default to 0 if want to use laptop webcam
+    camera_index = int(data.get("camera_index", 0))  # default to 0 for most laptops/webcams
 
     if not visit_id or not patient_id:
         return jsonify({"error": "visit_id and patient_id are required"}), 400
@@ -520,12 +616,20 @@ def start_face_analysis():
     ]
 
     try:
+        visit_dir = RUNS_DIR / f"visit_{visit_id}"
+        visit_dir.mkdir(parents=True, exist_ok=True)
+
+        face_log_path = visit_dir / "face_subprocess.log"
+        log_f = open(face_log_path, "a", encoding="utf-8")
         proc = subprocess.Popen(
             cmd,
             cwd=str(get_repo_root()),
+            stdout=log_f,
+            stderr=subprocess.STDOUT,
         )
 
         active_face_processes[visit_id] = proc
+        print(f"[Face] Logging to {face_log_path}")
         print(f"[Face] Started face analysis for visit {visit_id}: {' '.join(cmd)}")
         return jsonify({
             "status": "ok",

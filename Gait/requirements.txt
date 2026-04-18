@@ -1,0 +1,16 @@
+# Gait API — http://127.0.0.1:8000 (Vite proxies /api/gait here).
+#
+# Use a dedicated venv (recommended):  cd Gait && py -3.11 -m venv venv
+# Do not install into DrAITranscription/venv if that venv has protobuf 6.x;
+# MediaPipe 0.10.x needs protobuf 4.x (otherwise MessageFactory/GetPrototype errors).
+#
+# Requires Intel RealSense camera + pyrealsense2 wheel for your Python version.
+
+flask>=3.0,<4
+flask-cors>=4.0,<7
+numpy>=1.26,<2
+protobuf>=4.25.3,<5
+# Classic pose API (mp.solutions.pose). Newer mediapipe wheels may drop `solutions` — do not upgrade blindly.
+mediapipe==0.10.21
+opencv-contrib-python==4.11.0.86
+pyrealsense2

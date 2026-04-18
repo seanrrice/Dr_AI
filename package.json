@@ -4,8 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "concurrently \"vite\" \"npm run dev:transcription\"",
+    "dev": "concurrently \"vite\" \"npm run dev:transcription\" \"npm run dev:gait\"",
     "dev:transcription": "node scripts/run-transcription.js",
+    "dev:gait": "node scripts/run-gait.js",
     "dev:frontend": "vite",
     "build": "vite build",
     "preview": "vite preview"

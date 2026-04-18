@@ -21,6 +21,7 @@ from pathlib import Path
 from emotion_logger_spec_v01 import EmotionVisitLogger
 import statistics
 import json
+import os
 
 import sys
 
@@ -36,7 +37,7 @@ from common_utils.orchestrator_utils import update_manifest_status
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CHECKPOINT_PATH = PROJECT_ROOT / "models" / "emotion" / "best_model.pth"
+DEFAULT_CHECKPOINT_PATH = PROJECT_ROOT / "models" / "emotion" / "best_model.pth"
 
 EMOTION_LABELS = ["Angry", "Happy", "Sad", "Surprise", "Neutral"];
 NUM_CLASSES = len(EMOTION_LABELS)
@@ -70,7 +71,19 @@ def build_model(num_classes: int, dropout_p: float = 0.3):
 
 print("[INFO] Loading model checkpoint...")
 model = build_model(num_classes=NUM_CLASSES, dropout_p=0.3)
-state_dict = torch.load(CHECKPOINT_PATH, map_location=DEVICE)
+checkpoint_env = os.environ.get("EMOTION_CHECKPOINT")
+checkpoint_path = Path(checkpoint_env) if checkpoint_env else DEFAULT_CHECKPOINT_PATH
+
+if not checkpoint_path.exists():
+    raise FileNotFoundError(
+        f"Missing emotion model checkpoint at: {checkpoint_path}\n"
+        f"- Default expected path: {DEFAULT_CHECKPOINT_PATH}\n"
+        f"- You can override via environment variable EMOTION_CHECKPOINT.\n"
+        f"  PowerShell example:\n"
+        f"    $env:EMOTION_CHECKPOINT=\"{DEFAULT_CHECKPOINT_PATH}\""
+    )
+
+state_dict = torch.load(checkpoint_path, map_location=DEVICE)
 model.load_state_dict(state_dict)
 model.to(DEVICE)
 model.eval()

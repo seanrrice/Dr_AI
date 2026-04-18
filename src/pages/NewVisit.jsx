@@ -15,8 +15,12 @@ import { compareAllModels, getConsensusResult, analyzeKeywords, analyzeSentiment
 import { transcriptionService } from "@/services/transcriptionService";
 import { AudioJsonlLogger, makeRelativeTimer, parsePatientSegments } from "@/utils/jsonlLogger";
 import { demoFace, demoAudio, demoGait } from "@/data/reportSummaryDemoData";
-function formatTranscriptionForDisplay(text) {
+function formatTranscriptionForDisplay(text, useSpeakerLabels = true) {
   if (!text) return text;
+  if (!useSpeakerLabels) {
+    // In mono mode, remove speaker tags instead of mapping to Patient/Doctor.
+    return text.replace(/(\]\s*)Mic\s*\d+\s*:\s*/g, "$1");
+  }
   return text.replace(/Mic 1/g, "Patient").replace(/Mic 2/g, "Doctor");
 }
 export default function NewVisit() {
@@ -72,7 +76,11 @@ export default function NewVisit() {
   // Face refs/state
   const [isFaceRunning, setIsFaceRunning] = useState(false);
   const [faceError, setFaceError] = useState(null);
-  const [cameraIndex, setCameraIndex] = useState("1");
+  const [cameraIndex, setCameraIndex] = useState("0");
+  const [audioDevices, setAudioDevices] = useState([]);
+  const [audioDevicesError, setAudioDevicesError] = useState(null);
+  const [selectedAudioDevice, setSelectedAudioDevice] = useState("default");
+  const [channelMode, setChannelMode] = useState("2");
 
   // Gait refs/state
   const [isGaitRunning, setIsGaitRunning] = useState(false);
@@ -104,6 +112,24 @@ export default function NewVisit() {
   useEffect(() => {
     transcriptionService.connect().catch(() => {});
   }, [isGaitRunning]);
+
+  useEffect(() => {
+    let mounted = true;
+    transcriptionService.getInputDevices()
+      .then((devices) => {
+        if (!mounted) return;
+        setAudioDevices(devices);
+        setAudioDevicesError(null);
+      })
+      .catch((error) => {
+        if (!mounted) return;
+        console.error('Failed to load audio devices:', error);
+        setAudioDevicesError(error.message || 'Could not load audio devices');
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   // Cleanup transcription, face, gait on unmount
   useEffect(() => {
@@ -334,10 +360,11 @@ const handleStopFace = async () => {
 
   // Handle transcription updates
   useEffect(() => {
+    const useSpeakerLabels = channelMode === "2";
     if (isTranscribing) {
       transcriptionListenerRef.current = transcriptionService.addListener(async (event, data) => {
         if (event === 'update') {
-          const displayText = formatTranscriptionForDisplay(data.text);
+          const displayText = formatTranscriptionForDisplay(data.text, useSpeakerLabels);
           setVisitData(prev => ({
             ...prev,
             transcription: prev.transcription
@@ -359,7 +386,7 @@ const handleStopFace = async () => {
           }
 
         } else if (event === 'complete') {
-          const displayFull = formatTranscriptionForDisplay(data.full_text || "");
+          const displayFull = formatTranscriptionForDisplay(data.full_text || "", useSpeakerLabels);
           setVisitData(prev => ({ ...prev, transcription: displayFull || prev.transcription }));
           setIsTranscribing(false);
 
@@ -376,7 +403,7 @@ const handleStopFace = async () => {
         transcriptionListenerRef.current = null;
       }
     };
-  }, [isTranscribing]);
+  }, [isTranscribing, channelMode]);
 
   const createPatientMutation = useMutation({
     mutationFn: (patientData) => api.entities.Patient.create(patientData),
@@ -436,7 +463,10 @@ const handleStopFace = async () => {
     try {
       setTranscriptionError(null);
       setIsStartingTranscription(true);
-      await transcriptionService.start();
+      await transcriptionService.start(null, {
+        deviceIndex: selectedAudioDevice === "default" ? null : Number(selectedAudioDevice),
+        channels: Number(channelMode)
+      });
 
       // Initialize the JSONL logger for this recording session
       const t0 = Date.now();
@@ -463,7 +493,7 @@ const handleStopFace = async () => {
       if (result && result.full_text) {
         setVisitData(prev => ({
           ...prev,
-          transcription: formatTranscriptionForDisplay(result.full_text)
+          transcription: formatTranscriptionForDisplay(result.full_text, channelMode === "2")
         }));
       }
       setIsTranscribing(false);
@@ -1071,6 +1101,49 @@ const handleStopFace = async () => {
                   )}
                 </div>
               </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                <div className="space-y-1">
+                  <Label className="text-xs text-slate-600">Audio Input Device</Label>
+                  <Select
+                    value={selectedAudioDevice}
+                    onValueChange={setSelectedAudioDevice}
+                    disabled={isTranscribing || isStartingTranscription}
+                  >
+                    <SelectTrigger className="border-teal-200 bg-white/90">
+                      <SelectValue placeholder="Choose input device" />
+                    </SelectTrigger>
+                    <SelectContent className="border-teal-200">
+                      <SelectItem value="default">System Default Input</SelectItem>
+                      {audioDevices.map((device) => (
+                        <SelectItem key={String(device.index)} value={String(device.index)}>
+                          {device.name} ({device.max_input_channels} ch max)
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="space-y-1">
+                  <Label className="text-xs text-slate-600">Input Mode</Label>
+                  <Select
+                    value={channelMode}
+                    onValueChange={setChannelMode}
+                    disabled={isTranscribing || isStartingTranscription}
+                  >
+                    <SelectTrigger className="border-teal-200 bg-white/90">
+                      <SelectValue placeholder="Choose channel mode" />
+                    </SelectTrigger>
+                    <SelectContent className="border-teal-200">
+                      <SelectItem value="2">Two-channel (Patient/Doctor labels)</SelectItem>
+                      <SelectItem value="1">Single mic (no speaker labels)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+              {audioDevicesError && (
+                <p className="text-xs text-amber-700 bg-amber-50 rounded p-2">
+                  ⚠️ {audioDevicesError}
+                </p>
+              )}
               {isStartingTranscription && (
                 <div className="flex items-center gap-2 text-xs text-teal-600">
                   <Loader2 className="w-3 h-3 animate-spin" />
@@ -1082,18 +1155,6 @@ const handleStopFace = async () => {
                   <div className="flex items-center gap-2 text-xs text-blue-600">
                     <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
                     <span>Recording... Speak clearly into your microphone</span>
-                  </div>
-                  {/* Manifest-backed subsystem status */}
-                  <div className="flex items-center gap-3 mt-1">
-                    <span className={`text-xs flex items-center gap-1 ${manifestStatus.audio === 'done' ? 'text-green-600' : 'text-slate-400'}`}>
-                      🎤 Audio {manifestStatus.audio === 'done' ? '✓' : '…'}
-                    </span>
-                    <span className={`text-xs flex items-center gap-1 ${manifestStatus.face === 'done' ? 'text-green-600' : manifestStatus.face === 'running' ? 'text-teal-600' : 'text-slate-400'}`}>
-                      😐 Face {manifestStatus.face === 'done' ? '✓' : manifestStatus.face === 'running' ? '●' : '…'}
-                    </span>
-                    <span className={`text-xs flex items-center gap-1 ${manifestStatus.gait === 'done' ? 'text-green-600' : 'text-slate-400'}`}>
-                      🚶 Gait {manifestStatus.gait === 'done' ? '✓' : '…'}
-                    </span>
                   </div>
                 </div>
               )}

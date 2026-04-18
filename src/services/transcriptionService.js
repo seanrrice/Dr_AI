@@ -50,7 +50,7 @@ class TranscriptionService {
   /**
    * Start transcription
    */
-  async start(sessionId = null) {
+  async start(sessionId = null, options = {}) {
     if (this.isRecording) {
       throw new Error('Transcription is already running');
     }
@@ -60,13 +60,21 @@ class TranscriptionService {
     this.sessionId = sessionId || `session_${Date.now()}`;
     this.isRecording = true;
 
+    const payload = { session_id: this.sessionId };
+    if (Object.prototype.hasOwnProperty.call(options, 'deviceIndex')) {
+      payload.device_index = options.deviceIndex;
+    }
+    if (Object.prototype.hasOwnProperty.call(options, 'channels')) {
+      payload.channels = options.channels;
+    }
+
     try {
       const response = await fetch(`${TRANSCRIPTION_API_URL}/api/transcription/start`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ session_id: this.sessionId }),
+        body: JSON.stringify(payload),
       });
 
       if (!response.ok) {
@@ -81,6 +89,19 @@ class TranscriptionService {
       this.isRecording = false;
       throw error;
     }
+  }
+
+  /**
+   * List available input devices from transcription backend
+   */
+  async getInputDevices() {
+    const response = await fetch(`${TRANSCRIPTION_API_URL}/api/transcription/devices`);
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.error || 'Failed to fetch audio input devices');
+    }
+    const data = await response.json();
+    return data.devices || [];
   }
 
   /**
