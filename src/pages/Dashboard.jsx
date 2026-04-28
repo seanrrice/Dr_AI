@@ -36,8 +36,9 @@ export default function Dashboard() {
       });
     const seen = new Set();
     return rest.filter((v) => {
-      if (seen.has(v.id)) return false;
-      seen.add(v.id);
+      const key = `${v.patient_mrn || ""}::${v.id || ""}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
       return true;
     }).slice(0, 5);
   }, [visits]);
@@ -165,8 +166,10 @@ export default function Dashboard() {
                   const patient = getPatientByMrn(visit.patient_mrn);
                   return (
                     <Link 
-                      key={visit.id}
-                      to={createPageUrl(`ReportSummary?visitId=${visit.id}`)}
+                      key={`${visit.patient_mrn || "unknown"}-${visit.id}`}
+                      to={createPageUrl(
+                        `ReportSummary?visitId=${encodeURIComponent(visit.id)}&patientMrn=${encodeURIComponent(visit.patient_mrn || "")}`
+                      )}
                       className="block"
                     >
                       <div className="p-4 border border-teal-200 rounded-lg hover:border-teal-300 hover:bg-teal-50/50 transition-all">

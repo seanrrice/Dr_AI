@@ -569,8 +569,11 @@ export default function ReportSerialTrends() {
   const previous = snaps.length > 1 ? snaps[snaps.length - 2] : null;
 
   const backToReport = () => {
-    const q = visitId ? `?visitId=${encodeURIComponent(visitId)}` : "";
-    navigate(`${createPageUrl("ReportSummary")}${q}`);
+    const q = new URLSearchParams();
+    if (visitId) q.set("visitId", visitId);
+    if (patientMrn) q.set("patientMrn", patientMrn);
+    const qs = q.toString();
+    navigate(`${createPageUrl("ReportSummary")}${qs ? `?${qs}` : ""}`);
   };
 
   return (

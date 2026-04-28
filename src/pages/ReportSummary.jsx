@@ -242,13 +242,17 @@ export default function ReportSummary() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const visitIdParam = searchParams.get("visitId") || "";
+  const patientMrnParam = searchParams.get("patientMrn") || "";
   const reportSource = searchParams.get("source") || "";
   const isPreviousReportVisual = reportSource === "previous-report-visual";
 
   const { data: loadedVisit } = useQuery({
-    queryKey: ["visit", visitIdParam],
+    queryKey: ["visit", visitIdParam, patientMrnParam],
     queryFn: async () => {
-      const rows = await api.entities.Visit.filter({ id: visitIdParam });
+      const filter = patientMrnParam
+        ? { id: visitIdParam, patient_mrn: patientMrnParam }
+        : { id: visitIdParam };
+      const rows = await api.entities.Visit.filter(filter);
       return rows[0];
     },
     enabled: !!visitIdParam && !isPreviousReportVisual,

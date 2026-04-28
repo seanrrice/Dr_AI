@@ -374,6 +374,55 @@ const handleStopFace = async () => {
     };
   };
 
+  const buildGaitWindowsFromEventRows = (rows, visitId) => {
+    if (!Array.isArray(rows) || rows.length === 0) return [];
+    const frames = rows.filter((r) => r && r.event === 'gait_frame');
+    if (frames.length === 0) return [];
+
+    const numericSpeed = frames
+      .map((r) => Number(r.speed_norm))
+      .filter((v) => Number.isFinite(v));
+    const speedScale = numericSpeed.length > 0 ? 1.0 : 1.0;
+
+    const toNum = (v, fallback = null) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : fallback;
+    };
+
+    return frames.map((row, idx) => {
+      const tStart = toNum(row.t_s, idx * 0.03) ?? idx * 0.03;
+      const next = frames[idx + 1];
+      const tEnd = next ? toNum(next.t_s, tStart + 0.03) ?? (tStart + 0.03) : tStart + 0.03;
+
+      const lk = toNum(row.left_knee_deg);
+      const rk = toNum(row.right_knee_deg);
+      let symmetry = null;
+      if (lk != null && rk != null) {
+        symmetry = Math.max(0, 1 - Math.min(1, Math.abs(lk - rk) / 40));
+      }
+
+      const sway = toNum(row.trunk_sway);
+      const stability = sway != null ? Math.max(0, 1 - Math.min(1, Math.abs(sway) / 0.04)) : null;
+      const speedMps = toNum(row.speed_norm) != null ? Number(row.speed_norm) * speedScale : null;
+
+      return {
+        schema_version: 'v0.1',
+        type: 'window',
+        subsystem: 'gait',
+        visit_id: visitId,
+        t_start: tStart,
+        t_end: tEnd,
+        valid: true,
+        confidence: 0.85,
+        features: {
+          speed_mps: speedMps,
+          symmetry,
+          stability,
+        },
+      };
+    });
+  };
+
   const handleStartGait = async () => {
     if (!selectedPatientMrn) {
       alert('Please select a patient before starting gait / motion analysis.');
@@ -416,7 +465,38 @@ const handleStopFace = async () => {
             gait_overlay_video_url: summary.overlay_video_url || '',
           }));
 
-          const record = buildGaitJsonlRecord(summary, workingVisitId, selectedPatientMrn);
+          const summaryRecord = buildGaitJsonlRecord(summary, workingVisitId, selectedPatientMrn);
+          let recordsToUpload = [summaryRecord];
+
+          // If gait API exposes event-stream JSONL, convert frames to graph-ready windows.
+          const summaryJsonlUrl = data?.files?.summary_jsonl || data?.summary?.summary_jsonl_url;
+          if (summaryJsonlUrl) {
+            try {
+              const rawRes = await fetch(summaryJsonlUrl);
+              if (rawRes.ok) {
+                const rawText = await rawRes.text();
+                const rows = rawText
+                  .split(/\r?\n/)
+                  .map((line) => line.trim())
+                  .filter(Boolean)
+                  .map((line) => {
+                    try {
+                      return JSON.parse(line);
+                    } catch {
+                      return null;
+                    }
+                  })
+                  .filter(Boolean);
+                const windows = buildGaitWindowsFromEventRows(rows, workingVisitId);
+                if (windows.length > 0) {
+                  recordsToUpload = [summaryRecord, ...windows];
+                }
+              }
+            } catch (err) {
+              console.warn('Could not fetch gait event JSONL for window conversion:', err.message);
+            }
+          }
+
           try {
             const flushRes = await fetch(
               `http://localhost:5000/api/visits/${workingVisitId}/logs/gait`,
@@ -425,7 +505,7 @@ const handleStopFace = async () => {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                   patient_mrn: selectedPatientMrn,
-                  records: [record],
+                  records: recordsToUpload,
                 }),
               }
             );
@@ -562,7 +642,11 @@ const handleStopFace = async () => {
       workingVisitIdRef.current = null;
       setActiveCaptureVisitId("");
       queryClient.invalidateQueries(['visits']);
-      navigate(createPageUrl(`ReportSummary?visitId=${visit.id}`));
+      navigate(
+        createPageUrl(
+          `ReportSummary?visitId=${encodeURIComponent(visit.id)}&patientMrn=${encodeURIComponent(selectedPatientMrn || "")}`
+        )
+      );
     },
   });
 

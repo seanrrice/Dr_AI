@@ -167,7 +167,9 @@ export default function PatientAnalysis() {
                   .map((visit) => (
                     <li key={visit.id}>
                       <Link
-                        to={createPageUrl(`ReportSummary?visitId=${encodeURIComponent(visit.id)}`)}
+                        to={createPageUrl(
+                          `ReportSummary?visitId=${encodeURIComponent(visit.id)}&patientMrn=${encodeURIComponent(patientMrn || "")}`
+                        )}
                         className="flex items-center gap-4 p-4 hover:bg-teal-50/80 transition-colors group"
                       >
                         <div className="w-10 h-10 rounded-lg bg-teal-100 flex items-center justify-center shrink-0">
