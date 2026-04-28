@@ -421,9 +421,14 @@ export default function VisitDetails() {
     enabled: !!visit?.patient_id
   });
 
-  const handleExportPDF = () => {
-    if (visit && patient) {
-      generateVisitPDF(visit, patient);
+  const handleExportPDF = async () => {
+    if (!(visit && patient)) return;
+    try {
+      const r = await fetch(`${FLASK_URL}/api/visits/${visit.id}/report`);
+      const report = r.ok ? await r.json() : null;
+      generateVisitPDF(visit, patient, report);
+    } catch {
+      generateVisitPDF(visit, patient, null);
     }
   };
 

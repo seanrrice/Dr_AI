@@ -22,7 +22,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { generateCombinedReportPDF } from "@/utils/combinedReportPdf";
-import { demoSerialVisitSnapshots } from "@/data/reportSerialTrendDemoData";
 import {
   DEMO_REPORT_VISIT_ID,
   getReportDemoPackage,
@@ -293,6 +292,34 @@ export default function ReportSummary() {
     },
     enabled: !!patientIdForTrends && !isPreviousReportVisual,
   });
+
+  const { data: patientVisits = [] } = useQuery({
+    queryKey: ["patient-visits-for-pdf", patientIdForTrends],
+    queryFn: async () => {
+      if (!patientIdForTrends) return [];
+      const rows = await api.entities.Visit.filter({ patient_id: patientIdForTrends });
+      return Array.isArray(rows) ? rows : [];
+    },
+    enabled: !!patientIdForTrends && !isPreviousReportVisual,
+  });
+
+  const serialVisitsForPdf = useMemo(() => {
+    if (isPreviousReportVisual) return [];
+    if (!Array.isArray(patientVisits) || patientVisits.length === 0) return [];
+
+    const sortable = [...patientVisits];
+    sortable.sort((a, b) => {
+      const na = Number(a?.visit_number);
+      const nb = Number(b?.visit_number);
+      const aHasNum = Number.isFinite(na);
+      const bHasNum = Number.isFinite(nb);
+      if (aHasNum && bHasNum && na !== nb) return na - nb;
+      const da = a?.visit_date ? new Date(a.visit_date).getTime() : 0;
+      const db = b?.visit_date ? new Date(b.visit_date).getTime() : 0;
+      return da - db;
+    });
+    return sortable;
+  }, [isPreviousReportVisual, patientVisits]);
 
   const patientDisplayName = useMemo(() => {
     if (isPreviousReportVisual) {
@@ -836,7 +863,7 @@ export default function ReportSummary() {
                 audioDerived,
                 gaitDerived,
                 aiAssessment,
-                serialVisits: demoSerialVisitSnapshots,
+                serialVisits: serialVisitsForPdf,
                 multimodalConfidence: { co, cf, ca, cg },
                 recordCounts: { face: face.length, audio: audio.length, gait: gait.length },
                 nlpVisit,

@@ -1030,7 +1030,16 @@ def _canonical_gait_section_from_records(records):
             return default
 
     has_event_stream = any(
-        isinstance(r, dict) and r.get("event") in ("gait_frame", "gait_summary", "visit_start", "visit_end")
+        isinstance(r, dict)
+        and r.get("event")
+        in (
+            "gait_frame",
+            "gait_summary",
+            "visit_start",
+            "visit_end",
+            "gait_session_start",
+            "gait_session_end",
+        )
         for r in records
     )
     has_spec = any(isinstance(r, dict) and r.get("type") in ("summary", "window", "event") for r in records)
@@ -1053,12 +1062,30 @@ def _canonical_gait_section_from_records(records):
         return out
 
     if has_event_stream:
-        visit_start = next((r for r in records if r.get("event") == "visit_start"), None)
-        visit_id = (visit_start or {}).get("visit_id")
+        visit_start = next(
+            (
+                r
+                for r in records
+                if r.get("event") in ("visit_start", "gait_session_start")
+            ),
+            None,
+        )
         gs = next((r for r in records if r.get("event") == "gait_summary"), None)
         frames = [r for r in records if r.get("event") == "gait_frame"]
+        visit_id = (visit_start or {}).get("visit_id") or (gs or {}).get("visit_id")
 
-        mean_speed = _f((gs or {}).get("mean_speed_mps"))
+        def _metric(summary_row, *keys):
+            if not isinstance(summary_row, dict):
+                return None
+            metrics = summary_row.get("metrics")
+            for k in keys:
+                if summary_row.get(k) is not None:
+                    return summary_row.get(k)
+                if isinstance(metrics, dict) and metrics.get(k) is not None:
+                    return metrics.get(k)
+            return None
+
+        mean_speed = _f(_metric(gs, "mean_speed_mps"))
         norms = [_f(r.get("speed_norm"), 0.0) for r in frames]
         mean_norm = sum(norms) / max(len(norms), 1) if norms else 1.0
         if mean_norm <= 1e-9:
@@ -1097,12 +1124,15 @@ def _canonical_gait_section_from_records(records):
 
         summary = None
         if gs:
-            sym_idx = _f(gs.get("symmetry_index"))
+            sym_idx = _f(_metric(gs, "symmetry_index", "knee_symmetry_index_percent"))
             avg_sym = max(0.0, 1.0 - min(1.0, sym_idx / 100.0)) if sym_idx is not None else None
-            sway_rms = _f(gs.get("trunk_sway_rms"))
+            sway_rms = _f(_metric(gs, "trunk_sway_rms", "trunk_sway_rms_m"))
             avg_stab = max(0.0, 1.0 - min(1.0, sway_rms / 0.08)) if sway_rms is not None else None
-            t_end = max((_f(r.get("t_s"), 0.0) or 0.0 for r in frames), default=0.0)
-            mean_speed_gs = _f(gs.get("mean_speed_mps"))
+            t_end = max(
+                max((_f(r.get("t_s"), 0.0) or 0.0 for r in frames), default=0.0),
+                _f(_metric(gs, "duration_s"), 0.0) or 0.0,
+            )
+            mean_speed_gs = _f(_metric(gs, "mean_speed_mps"))
             summary = {
                 "schema_version": "v0.1",
                 "type": "summary",
@@ -1112,8 +1142,8 @@ def _canonical_gait_section_from_records(records):
                 "t_end": float(t_end),
                 "valid": True,
                 "confidence": (
-                    float(gs["quality_ok_fraction"])
-                    if gs.get("quality_ok_fraction") is not None
+                    float(_metric(gs, "quality_ok_fraction"))
+                    if _metric(gs, "quality_ok_fraction") is not None
                     else 0.85
                 ),
                 "features": {
@@ -1122,16 +1152,18 @@ def _canonical_gait_section_from_records(records):
                     "avg_stability": avg_stab,
                 },
                 "notes": "",
-                "num_steps": gs.get("num_steps"),
-                "cadence_spm": gs.get("cadence_spm"),
-                "mean_speed_mps": gs.get("mean_speed_mps"),
-                "symmetry_index": gs.get("symmetry_index"),
-                "left_knee_mean": gs.get("left_knee_mean"),
-                "right_knee_mean": gs.get("right_knee_mean"),
-                "trunk_sway_rms": gs.get("trunk_sway_rms"),
-                "trunk_sway_peak_to_peak": gs.get("trunk_sway_peak_to_peak"),
-                "sit_to_stand_detected": gs.get("sit_to_stand_detected"),
-                "quality_ok_fraction": gs.get("quality_ok_fraction"),
+                "num_steps": _metric(gs, "num_steps", "num_steps_est"),
+                "cadence_spm": _metric(gs, "cadence_spm"),
+                "mean_speed_mps": _metric(gs, "mean_speed_mps"),
+                "symmetry_index": _metric(gs, "symmetry_index", "knee_symmetry_index_percent"),
+                "left_knee_mean": _metric(gs, "left_knee_mean", "left_knee_mean_deg"),
+                "right_knee_mean": _metric(gs, "right_knee_mean", "right_knee_mean_deg"),
+                "trunk_sway_rms": _metric(gs, "trunk_sway_rms", "trunk_sway_rms_m"),
+                "trunk_sway_peak_to_peak": _metric(
+                    gs, "trunk_sway_peak_to_peak", "trunk_sway_peak_to_peak_m"
+                ),
+                "sit_to_stand_detected": _metric(gs, "sit_to_stand_detected"),
+                "quality_ok_fraction": _metric(gs, "quality_ok_fraction"),
             }
         elif frames:
             t_end = max((_f(r.get("t_s"), 0.0) or 0.0 for r in frames), default=0.0)

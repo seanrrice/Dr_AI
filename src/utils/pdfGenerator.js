@@ -1,7 +1,45 @@
 import jsPDF from 'jspdf';
 import { format } from 'date-fns';
 
-export const generateVisitPDF = (visit, patient) => {
+const safeNum = (v) => (v == null || Number.isNaN(Number(v)) ? null : Number(v));
+
+const getGaitFromStoredData = (visit, report) => {
+  const reportGait = report?.sections?.gait || null;
+
+  if (reportGait?.summary && typeof reportGait.summary === 'object') {
+    return reportGait.summary;
+  }
+  if (reportGait && reportGait.type === 'summary') {
+    return reportGait;
+  }
+
+  const gaitRows = Array.isArray(visit?.multimodal_jsonl?.gait) ? visit.multimodal_jsonl.gait : [];
+  const mmSummary = gaitRows.find((r) => r?.type === 'summary');
+  if (mmSummary) return mmSummary;
+
+  if (visit?.gait_summary && typeof visit.gait_summary === 'object') {
+    return visit.gait_summary;
+  }
+  return null;
+};
+
+const getAudioFromStoredData = (visit, report) => {
+  const reportAudio = report?.sections?.audio;
+  if (reportAudio?.summary && typeof reportAudio.summary === 'object') {
+    return reportAudio.summary;
+  }
+  const audioRows = Array.isArray(visit?.multimodal_jsonl?.audio) ? visit.multimodal_jsonl.audio : [];
+  return audioRows.find((r) => r?.type === 'summary') || null;
+};
+
+const getFaceFromStoredData = (visit, report) => {
+  const reportFace = report?.sections?.face;
+  if (reportFace && typeof reportFace === 'object') return reportFace;
+  const faceRows = Array.isArray(visit?.multimodal_jsonl?.face) ? visit.multimodal_jsonl.face : [];
+  return faceRows.find((r) => r?.type === 'summary') || null;
+};
+
+export const generateVisitPDF = (visit, patient, report = null) => {
   const doc = new jsPDF();
   let yPosition = 20;
   const lineHeight = 7;
@@ -67,37 +105,72 @@ export const generateVisitPDF = (visit, patient) => {
     if (visit.spo2) addText(`SpO2: ${visit.spo2}%`);
   }
 
-  // ----------- ✅ GAIT ANALYSIS (YOUR FEATURE KEPT) -----------
-  if (visit.gait_summary) {
+  const gaitSummary = getGaitFromStoredData(visit, report);
+  if (gaitSummary) {
     addSection('GAIT ANALYSIS');
 
-    if (visit.gait_summary_text || visit.gait_summary.summary_text) {
-      addText(`Summary: ${visit.gait_summary_text || visit.gait_summary.summary_text}`);
+    const gaitFeatures = gaitSummary.features || {};
+    const summaryText = visit.gait_summary_text || gaitSummary.summary_text || gaitSummary.notes;
+    if (summaryText) {
+      addText(`Summary: ${summaryText}`);
     }
 
-    if (visit.gait_summary.mean_speed_mps != null)
-      addText(`Mean Gait Speed: ${visit.gait_summary.mean_speed_mps} m/s`);
+    const meanSpeed =
+      safeNum(gaitSummary.mean_speed_mps) ??
+      safeNum(gaitFeatures.avg_speed_mps) ??
+      safeNum(gaitFeatures.speed_mps);
+    if (meanSpeed != null) addText(`Mean Gait Speed: ${meanSpeed.toFixed(2)} m/s`);
 
-    if (visit.gait_summary.cadence_spm != null)
-      addText(`Cadence: ${visit.gait_summary.cadence_spm} steps/min`);
+    const cadence = safeNum(gaitSummary.cadence_spm);
+    if (cadence != null) addText(`Cadence: ${cadence.toFixed(1)} steps/min`);
 
-    if (visit.gait_summary.num_steps_est != null)
-      addText(`Estimated Steps: ${visit.gait_summary.num_steps_est}`);
+    const steps = gaitSummary.num_steps_est ?? gaitSummary.num_steps;
+    if (steps != null) addText(`Estimated Steps: ${steps}`);
 
-    if (visit.gait_summary.knee_symmetry_index_percent != null)
-      addText(`Knee Symmetry Index: ${visit.gait_summary.knee_symmetry_index_percent}%`);
+    const symmetryPct =
+      safeNum(gaitSummary.knee_symmetry_index_percent) ??
+      (safeNum(gaitFeatures.avg_symmetry) != null ? safeNum(gaitFeatures.avg_symmetry) * 100 : null);
+    if (symmetryPct != null) addText(`Knee Symmetry Index: ${symmetryPct.toFixed(1)}%`);
 
-    if (visit.gait_summary.stability_ap_rms_m != null)
-      addText(`AP Stability RMS: ${visit.gait_summary.stability_ap_rms_m} m`);
+    if (safeNum(gaitSummary.stability_ap_rms_m) != null)
+      addText(`AP Stability RMS: ${Number(gaitSummary.stability_ap_rms_m).toFixed(3)} m`);
 
-    if (visit.gait_summary.stability_ml_rms_m != null)
-      addText(`ML Stability RMS: ${visit.gait_summary.stability_ml_rms_m} m`);
+    if (safeNum(gaitSummary.stability_ml_rms_m) != null)
+      addText(`ML Stability RMS: ${Number(gaitSummary.stability_ml_rms_m).toFixed(3)} m`);
 
-    if (visit.gait_summary.sit_to_stand_detected != null)
-      addText(`Sit-to-Stand Detected: ${visit.gait_summary.sit_to_stand_detected ? 'Yes' : 'No'}`);
+    if (gaitSummary.sit_to_stand_detected != null)
+      addText(`Sit-to-Stand Detected: ${gaitSummary.sit_to_stand_detected ? 'Yes' : 'No'}`);
 
-    if (visit.gait_summary.sit_to_stand_time_s != null)
-      addText(`Sit-to-Stand Time: ${visit.gait_summary.sit_to_stand_time_s} s`);
+    const sts =
+      safeNum(gaitSummary.sit_to_stand_time_s) ??
+      safeNum(gaitSummary.sit_to_stand_duration_s);
+    if (sts != null) addText(`Sit-to-Stand Time: ${sts.toFixed(2)} s`);
+  }
+
+  const faceSummary = getFaceFromStoredData(visit, report);
+  if (faceSummary?.features) {
+    const emotionPct = faceSummary.features.emotion_pct || {};
+    const topEmotion = Object.entries(emotionPct).sort((a, b) => b[1] - a[1])[0];
+    addSection('FACIAL ANALYSIS');
+    if (topEmotion) {
+      addText(`Dominant emotion: ${topEmotion[0]} (${Number(topEmotion[1]).toFixed(1)}%)`);
+    }
+    if (faceSummary.features.total_samples != null) {
+      addText(`Samples analyzed: ${faceSummary.features.total_samples}`);
+    }
+  }
+
+  const audioSummary = getAudioFromStoredData(visit, report);
+  if (audioSummary?.features) {
+    addSection('AUDIO / LANGUAGE ANALYSIS');
+    const sent = audioSummary.features.sentiment || audioSummary.features.sentiment_analysis || {};
+    const polarity = safeNum(sent.polarity ?? sent.sentiment_score);
+    if (polarity != null) addText(`Mean sentiment polarity: ${polarity.toFixed(2)}`);
+    const topWords = audioSummary.features.top_words || [];
+    if (Array.isArray(topWords) && topWords.length) {
+      const line = topWords.slice(0, 6).map((w) => `${w[0]} (${w[1]})`).join(', ');
+      addText(`Top words: ${line}`);
+    }
   }
 
   // AI Assessment
