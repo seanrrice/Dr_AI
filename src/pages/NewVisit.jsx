@@ -331,11 +331,70 @@ const handleStopFace = async () => {
 
   //====== Gait analysis handlers======================
 
+  const buildGaitJsonlRecord = (summary, visitId, patientId) => {
+    const dur = Number(summary?.duration_s);
+    const baseFeatures =
+      summary?.features && typeof summary.features === 'object' ? summary.features : {};
+    return {
+      ...summary,
+      schema_version: 'v0.1',
+      type: 'summary',
+      subsystem: 'gait',
+      phase: 'entry',
+      visit_id: visitId,
+      patient_id: patientId || '',
+      t_start: 0,
+      t_end: Number.isFinite(dur) ? dur : 0,
+      valid: true,
+      confidence:
+        typeof summary?.tracking_quality_gait_ok_fraction === 'number'
+          ? summary.tracking_quality_gait_ok_fraction
+          : typeof summary?.tracking_quality_upper_ok_fraction === 'number'
+            ? summary.tracking_quality_upper_ok_fraction
+            : 0.85,
+      features: {
+        ...baseFeatures,
+        avg_speed_mps:
+          summary?.mean_speed_mps ??
+          summary?.mean_forward_speed_mps ??
+          baseFeatures.avg_speed_mps ??
+          null,
+        avg_symmetry:
+          summary?.knee_symmetry_index_percent != null
+            ? Number(summary.knee_symmetry_index_percent) / 100
+            : baseFeatures.avg_symmetry ?? null,
+        avg_stability:
+          summary?.stability_planar_rms_m != null
+            ? Math.max(0, 1 - Math.min(1, Number(summary.stability_planar_rms_m)))
+            : baseFeatures.avg_stability ?? null,
+      },
+      notes: summary?.summary_text || summary?.notes || '',
+    };
+  };
+
   const handleStartGait = async () => {
+    if (!selectedPatientId) {
+      alert('Please select a patient before starting gait / motion analysis.');
+      return;
+    }
+
     try {
       setGaitError(null);
       setGaitSummary(null);
       setIsGaitRunning(true);
+
+      const workingVisitId = ensureWorkingVisitId();
+      try {
+        await fetch(`http://localhost:5000/api/visits/${workingVisitId}/create`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ patient_id: selectedPatientId }),
+        });
+        startManifestPolling(workingVisitId);
+        setActiveCaptureVisitId(workingVisitId);
+      } catch (err) {
+        console.warn('Flask offline, gait JSONL may not save to runs:', err.message);
+      }
 
       gaitRunPromiseRef.current = fetch('/api/gait?duration=0')
         .then(async (res) => {
@@ -352,8 +411,30 @@ const handleStopFace = async () => {
             ...prev,
             gait_summary: summary,
             gait_summary_text: summaryText,
-            gait_overlay_video_url: summary.overlay_video_url || ''
+            gait_overlay_video_url: summary.overlay_video_url || '',
           }));
+
+          const record = buildGaitJsonlRecord(summary, workingVisitId, selectedPatientId);
+          try {
+            const flushRes = await fetch(
+              `http://localhost:5000/api/visits/${workingVisitId}/logs/gait`,
+              {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  patient_id: selectedPatientId,
+                  records: [record],
+                }),
+              }
+            );
+            if (flushRes.ok) {
+              console.log('✅ gait.jsonl saved to Flask runs directory');
+            } else {
+              console.warn('Could not save gait.jsonl:', flushRes.status, await flushRes.text());
+            }
+          } catch (err) {
+            console.warn('Flask offline, skipping gait.jsonl upload:', err.message);
+          }
         })
         .catch((err) => {
           console.error(err);
@@ -362,7 +443,6 @@ const handleStopFace = async () => {
         .finally(() => {
           setIsGaitRunning(false);
         });
-
     } catch (err) {
       setGaitError(err.message || 'Failed to start gait capture');
       setIsGaitRunning(false);

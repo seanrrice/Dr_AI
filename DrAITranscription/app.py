@@ -940,6 +940,56 @@ def save_audio_log(visit_id):
     return jsonify({"status": "ok", "records": len(records)})
 
 
+@app.route('/api/visits/<visit_id>/logs/gait', methods=['POST'])
+def save_gait_log(visit_id):
+    data = request.get_json(silent=True) or {}
+    visit_dir = _resolve_visit_dir(visit_id, patient_id=data.get("patient_id"), create=True)
+    gait_path = visit_dir / "gait.jsonl"
+
+    content_type = request.content_type or ""
+    raw = request.get_data(as_text=True)
+
+    records = []
+    if "ndjson" in content_type or "jsonl" in content_type or "\n" in raw:
+        for line in raw.splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    records.append(json.loads(line))
+                except Exception:
+                    pass
+    else:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                records = parsed
+            elif isinstance(parsed, dict):
+                if "records" in parsed and isinstance(parsed["records"], list):
+                    records = parsed["records"]
+                else:
+                    records = [parsed]
+        except Exception:
+            pass
+
+    with open(gait_path, "w", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(record) + "\n")
+
+    manifest_path = visit_dir / "manifest.json"
+    if manifest_path.exists():
+        try:
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+            manifest["status"]["gait"] = "done"
+            with open(manifest_path, "w", encoding="utf-8") as f:
+                json.dump(manifest, f, indent=2)
+        except Exception:
+            pass
+
+    print(f"[Visit] Gait JSONL saved -> {gait_path} ({len(records)} records)")
+    return jsonify({"status": "ok", "records": len(records)})
+
+
 @app.route('/api/visits/rename', methods=['POST'])
 def rename_visit_folder():
     data = request.get_json(silent=True) or {}
@@ -960,6 +1010,157 @@ def rename_visit_folder():
             shutil.copy2(str(file), str(new_dir / file.name))
         print(f"[Visit] Copied folder: {old_dir} -> {new_dir}")
     return jsonify({"status": "ok"})
+
+
+def _canonical_gait_section_from_records(records):
+    """
+    Normalize gait.jsonl into the shape ReportSummary expects (summary + optional window rows).
+
+    Supports:
+    - Doctor AI spec lines with top-level "type": "summary" | "window" | "event"
+    - Event-stream logs: visit_start, gait_frame, gait_summary, visit_end (see gait_visit_20s.jsonl)
+    """
+    if not records:
+        return None
+
+    def _f(x, default=None):
+        try:
+            return float(x) if x is not None else default
+        except (TypeError, ValueError):
+            return default
+
+    has_event_stream = any(
+        isinstance(r, dict) and r.get("event") in ("gait_frame", "gait_summary", "visit_start", "visit_end")
+        for r in records
+    )
+    has_spec = any(isinstance(r, dict) and r.get("type") in ("summary", "window", "event") for r in records)
+
+    if has_spec and not has_event_stream:
+        summary = next((r for r in records if r.get("type") == "summary"), None)
+        windows = [r for r in records if r.get("type") == "window"]
+        events = [r for r in records if r.get("type") == "event"]
+        if not summary and not windows:
+            return None
+        if summary and not windows and not events:
+            return summary
+        out = {"record_count": len(records)}
+        if summary:
+            out["summary"] = summary
+        if windows:
+            out["windows"] = windows
+        if events:
+            out["events"] = events
+        return out
+
+    if has_event_stream:
+        visit_start = next((r for r in records if r.get("event") == "visit_start"), None)
+        visit_id = (visit_start or {}).get("visit_id")
+        gs = next((r for r in records if r.get("event") == "gait_summary"), None)
+        frames = [r for r in records if r.get("event") == "gait_frame"]
+
+        mean_speed = _f((gs or {}).get("mean_speed_mps"))
+        norms = [_f(r.get("speed_norm"), 0.0) for r in frames]
+        mean_norm = sum(norms) / max(len(norms), 1) if norms else 1.0
+        if mean_norm <= 1e-9:
+            mean_norm = 1.0
+        scale = (mean_speed / mean_norm) if mean_speed is not None else 1.0
+
+        windows = []
+        for i, row in enumerate(frames):
+            t = _f(row.get("t_s"), 0.0) or 0.0
+            t_next = _f(frames[i + 1].get("t_s"), t + 0.03) if i + 1 < len(frames) else t + 0.03
+            lk = row.get("left_knee_deg")
+            rk = row.get("right_knee_deg")
+            knee_sym = None
+            if lk is not None and rk is not None:
+                knee_sym = max(0.0, 1.0 - min(1.0, abs(_f(lk) - _f(rk)) / 40.0))
+            sway = _f(row.get("trunk_sway"), 0.0) or 0.0
+            stability = max(0.0, 1.0 - min(1.0, abs(sway) / 0.04))
+            speed_mps = (_f(row.get("speed_norm"), 0.0) or 0.0) * scale
+            windows.append(
+                {
+                    "schema_version": "v0.1",
+                    "type": "window",
+                    "subsystem": "gait",
+                    "visit_id": visit_id,
+                    "t_start": t,
+                    "t_end": t_next,
+                    "valid": True,
+                    "confidence": 0.85,
+                    "features": {
+                        "speed_mps": speed_mps,
+                        "symmetry": knee_sym,
+                        "stability": stability,
+                    },
+                }
+            )
+
+        summary = None
+        if gs:
+            sym_idx = _f(gs.get("symmetry_index"))
+            avg_sym = max(0.0, 1.0 - min(1.0, sym_idx / 100.0)) if sym_idx is not None else None
+            sway_rms = _f(gs.get("trunk_sway_rms"))
+            avg_stab = max(0.0, 1.0 - min(1.0, sway_rms / 0.08)) if sway_rms is not None else None
+            t_end = max((_f(r.get("t_s"), 0.0) or 0.0 for r in frames), default=0.0)
+            mean_speed_gs = _f(gs.get("mean_speed_mps"))
+            summary = {
+                "schema_version": "v0.1",
+                "type": "summary",
+                "subsystem": "gait",
+                "visit_id": visit_id,
+                "t_start": 0.0,
+                "t_end": float(t_end),
+                "valid": True,
+                "confidence": (
+                    float(gs["quality_ok_fraction"])
+                    if gs.get("quality_ok_fraction") is not None
+                    else 0.85
+                ),
+                "features": {
+                    "avg_speed_mps": mean_speed_gs,
+                    "avg_symmetry": avg_sym,
+                    "avg_stability": avg_stab,
+                },
+                "notes": "",
+                "num_steps": gs.get("num_steps"),
+                "cadence_spm": gs.get("cadence_spm"),
+                "mean_speed_mps": gs.get("mean_speed_mps"),
+                "symmetry_index": gs.get("symmetry_index"),
+                "left_knee_mean": gs.get("left_knee_mean"),
+                "right_knee_mean": gs.get("right_knee_mean"),
+                "trunk_sway_rms": gs.get("trunk_sway_rms"),
+                "trunk_sway_peak_to_peak": gs.get("trunk_sway_peak_to_peak"),
+                "sit_to_stand_detected": gs.get("sit_to_stand_detected"),
+                "quality_ok_fraction": gs.get("quality_ok_fraction"),
+            }
+        elif frames:
+            t_end = max((_f(r.get("t_s"), 0.0) or 0.0 for r in frames), default=0.0)
+            summary = {
+                "schema_version": "v0.1",
+                "type": "summary",
+                "subsystem": "gait",
+                "visit_id": visit_id,
+                "t_start": 0.0,
+                "t_end": float(t_end),
+                "valid": True,
+                "confidence": 0.75,
+                "features": {},
+                "notes": "Gait frames without gait_summary row",
+            }
+
+        if summary is None and not windows:
+            return None
+        if summary and not windows:
+            return summary
+        return {"summary": summary, "windows": windows, "record_count": len(records)}
+
+    summary = next((r for r in records if r.get("type") == "summary"), None)
+    if summary:
+        windows = [r for r in records if r.get("type") == "window"]
+        if windows:
+            return {"summary": summary, "windows": windows, "record_count": len(records)}
+        return summary
+    return records[-1] if records else None
 
 
 @app.route('/api/visits/<visit_id>/report', methods=['GET'])
@@ -998,9 +1199,10 @@ def get_report(visit_id):
     if gait_path.exists():
         try:
             records = [json.loads(line) for line in gait_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-            summary = next((r for r in records if r.get("type") == "summary"), records[0] if records else None)
-            result["sections"]["gait"] = summary
-            result["availability"]["gait"] = "available"
+            section = _canonical_gait_section_from_records(records)
+            if section is not None:
+                result["sections"]["gait"] = section
+                result["availability"]["gait"] = "available"
         except Exception as e:
             print(f"[Report] Error reading gait.jsonl: {e}")
     return jsonify(result)
@@ -1141,8 +1343,9 @@ def integrate_visit(visit_id):
     # Gait
     gait_records = load_jsonl(visit_dir / "gait.jsonl")
     if gait_records:
-        summary = get_summary(gait_records)
-        sections["gait"] = summary or {}
+        canonical = _canonical_gait_section_from_records(gait_records)
+        if canonical is not None:
+            sections["gait"] = canonical
         availability["gait"] = "available"
 
     # Extract IDs
