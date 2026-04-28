@@ -101,7 +101,46 @@ class TranscriptionService {
       throw new Error(error.error || 'Failed to fetch audio input devices');
     }
     const data = await response.json();
-    return data.devices || [];
+    const devices = Array.isArray(data.devices) ? data.devices : [];
+
+    // Windows/PortAudio can expose the same physical mic multiple times
+    // (different host APIs or alias wrappers like Sound Mapper / Primary Capture).
+    const isGenericAlias = (name) =>
+      /(microsoft sound mapper\s*-\s*input|primary sound capture driver)/i.test(String(name || ''));
+
+    const normalizeName = (name) =>
+      String(name || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+
+    const byName = new Map();
+    for (const d of devices) {
+      const name = String(d?.name || '').trim();
+      if (!name || isGenericAlias(name)) continue;
+
+      const key = normalizeName(name);
+      const existing = byName.get(key);
+      if (!existing) {
+        byName.set(key, d);
+        continue;
+      }
+
+      // Prefer richer channel capacity, then stable lower index.
+      const dCh = Number(d?.max_input_channels || 0);
+      const eCh = Number(existing?.max_input_channels || 0);
+      if (dCh > eCh) {
+        byName.set(key, d);
+      } else if (dCh === eCh) {
+        const dIdx = Number(d?.index ?? Number.MAX_SAFE_INTEGER);
+        const eIdx = Number(existing?.index ?? Number.MAX_SAFE_INTEGER);
+        if (dIdx < eIdx) byName.set(key, d);
+      }
+    }
+
+    return Array.from(byName.values()).sort((a, b) =>
+      String(a?.name || '').localeCompare(String(b?.name || ''), undefined, { sensitivity: 'base' })
+    );
   }
 
   /**
