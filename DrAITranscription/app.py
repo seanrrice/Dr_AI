@@ -18,6 +18,8 @@ import shutil
 from pathlib import Path
 from datetime import datetime
 
+from collections import deque
+import difflib
 
 #Ensure repo root is in sys.path for imports
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -43,7 +45,7 @@ DEVICE_INDEX_FALLBACK = 15   # Fallback if 24 fails
 SAMPLE_RATE_CAPTURE = 48000
 SAMPLE_RATE_WHISPER = 16000
 CHANNELS = 2
-CHUNK = 1024
+CHUNK = 1536
 RMS_THRESHOLD = 0.01
 MIN_SPEECH = 0.5       # seconds
 SILENCE_DURATION = 0.8 # seconds
@@ -51,7 +53,7 @@ SILENCE_DURATION = 0.8 # seconds
 USE_CALLBACK_CAPTURE = True
 # Max segments to queue for transcription; excess dropped to avoid long backlog
 MAX_SEGMENT_QUEUE = 2
-RMS_DISPLAY_INTERVAL = 0.05  # seconds between RMS console updates
+RMS_DISPLAY_INTERVAL = 0.1  # seconds between RMS console updates
 
 # Optional colors for console
 NEON_GREEN = "\033[92m"
@@ -125,6 +127,42 @@ class TranscriptionSession:
         self._rms_lock = threading.Lock()
         self._rms_ch1 = 0.0
         self._rms_ch2 = 0.0
+        self._last_stream_status_log_at = 0.0
+        self._last_rms_update_at = 0.0
+
+        # Rolling buffer for streaming transcription
+        self._buffer_lock = threading.Lock()
+        self._audio_buf_ch1 = deque()
+        self._audio_buf_ch2 = deque()
+        self._buf_max_seconds = float(os.environ.get("STREAM_BUF_SECONDS", "20"))  # ring buffer size
+        self._window_seconds = float(os.environ.get("STREAM_WINDOW_SECONDS", "6"))  # transcribe window
+        self._update_interval_s = float(os.environ.get("STREAM_UPDATE_INTERVAL_S", "0.5"))
+        self._tail_keep_tokens = int(os.environ.get("STREAM_TAIL_KEEP_TOKENS", "2"))
+        self._stability_k = int(os.environ.get("STREAM_STABILITY_K", "2"))
+        self._use_vad_filter = os.environ.get("STREAM_USE_VAD_FILTER", "1").strip() not in ("0", "false", "False")
+        self._stream_mode = os.environ.get("STREAM_MODE", "1").strip() not in ("0", "false", "False")
+
+        self._stream_start_wall = None
+        self._stream_stop_event = threading.Event()
+
+        # Accumulated transcript lines (stable)
+        self._lines = []
+        self._last_full_text = ""
+        self._last_interim_lines = []
+        self._ch_state = {
+            "Mic 1": {
+                "committed_end_s": 0.0,
+                "history": deque(maxlen=max(1, self._stability_k)),
+                "last_pending_words": [],
+                "empty_updates": 0,
+            },
+            "Mic 2": {
+                "committed_end_s": 0.0,
+                "history": deque(maxlen=max(1, self._stability_k)),
+                "last_pending_words": [],
+                "empty_updates": 0,
+            },
+        }
 
         # Load Whisper model if available.
         self.model = None
@@ -154,6 +192,201 @@ class TranscriptionSession:
                 else:
                     print(f"[Session] Failed to load Whisper model: {e}")
                     self.model = None
+
+    def _seconds_since_start(self):
+        if self._stream_start_wall is None:
+            return 0.0
+        return max(0.0, time.time() - self._stream_start_wall)
+
+    def _append_to_ring(self, ch1, ch2=None):
+        max_len = int(self._buf_max_seconds * SAMPLE_RATE_CAPTURE)
+        with self._buffer_lock:
+            self._audio_buf_ch1.extend(ch1.tolist())
+            while len(self._audio_buf_ch1) > max_len:
+                self._audio_buf_ch1.popleft()
+            if ch2 is not None:
+                self._audio_buf_ch2.extend(ch2.tolist())
+                while len(self._audio_buf_ch2) > max_len:
+                    self._audio_buf_ch2.popleft()
+
+    def _read_window(self, which="Mic 1"):
+        need = int(self._window_seconds * SAMPLE_RATE_CAPTURE)
+        with self._buffer_lock:
+            buf = self._audio_buf_ch1 if which == "Mic 1" else self._audio_buf_ch2
+            if len(buf) < max(need // 4, 1):
+                return None, None
+            # take last need samples (or all if smaller)
+            tail = list(buf)[-need:]
+            actual_len = len(tail)
+        audio = np.asarray(tail, dtype=np.float32)
+        window_duration_s = actual_len / float(SAMPLE_RATE_CAPTURE)
+        window_start_s = max(0.0, self._seconds_since_start() - window_duration_s)
+        return audio, window_start_s
+
+    def _transcribe_words(self, audio_1d):
+        """Return list of dicts: {word, start, end} with word timestamps in seconds."""
+        if audio_1d is None:
+            return []
+        # quick silence skip (pre-VAD) to avoid wasted calls
+        if float(np.sqrt(np.mean(audio_1d**2))) < RMS_THRESHOLD:
+            return []
+        audio_1d = normalize_audio(audio_1d.astype(np.float32))
+        audio_1d = resample_audio(audio_1d, SAMPLE_RATE_CAPTURE, SAMPLE_RATE_WHISPER)
+        wav_path = save_wav_file(audio_1d, SAMPLE_RATE_WHISPER, 1)
+        try:
+            if not self.model:
+                return []
+            segments, _info = self.model.transcribe(
+                wav_path,
+                vad_filter=self._use_vad_filter,
+                word_timestamps=True,
+            )
+            out = []
+            for seg in segments:
+                for w in getattr(seg, "words", []) or []:
+                    ww = (w.word or "").strip()
+                    if not ww:
+                        continue
+                    out.append({"word": ww, "start": float(w.start), "end": float(w.end)})
+            return out
+        except Exception as e:
+            print(f"[Stream] Transcription error: {e}")
+            return []
+        finally:
+            try:
+                os.remove(wav_path)
+            except Exception:
+                pass
+
+    def _stable_prefix_len(self, histories):
+        """Compute stable prefix length across last K hypotheses (word strings)."""
+        if not histories:
+            return 0
+        lists = [h for h in histories if isinstance(h, list)]
+        if len(lists) == 0:
+            return 0
+        if len(lists) == 1:
+            return len(lists[0])
+        min_len = min(len(x) for x in lists)
+        n = 0
+        for i in range(min_len):
+            w0 = lists[0][i].get("word")
+            if all(x[i].get("word") == w0 for x in lists[1:]):
+                n += 1
+            else:
+                break
+        return n
+
+    def _filter_new_words(self, words, committed_end_s):
+        if not words:
+            return []
+        eps = 1e-3
+        return [w for w in words if float(w.get("end", 0.0)) > committed_end_s + eps]
+
+    def _commit_words_as_line(self, mic, words):
+        if not words:
+            return None
+        state = self._ch_state[mic]
+        s = words[0]["start"]
+        e = words[-1]["end"]
+        text = " ".join(w["word"] for w in words).strip()
+        if not text:
+            return None
+        line = f"[{self._format_stamp(s)} -> {self._format_stamp(e)}] {mic}: {text}"
+        with self._transcript_lock:
+            self.transcripts.append(line)
+        self._lines.append(line)
+        state["committed_end_s"] = max(float(state["committed_end_s"]), float(e))
+        rebased = deque(maxlen=max(1, self._stability_k))
+        for hist in list(state["history"]):
+            rebased.append(self._filter_new_words(hist, state["committed_end_s"]))
+        state["history"] = rebased
+        state["last_pending_words"] = []
+        state["empty_updates"] = 0
+        return line
+
+    def _format_stamp(self, seconds):
+        return format_timestamp(seconds)
+
+    def _emit_update(self, session_id, newly_finalized_line=None):
+        full_text = "\n".join(self._lines)
+        if full_text.strip():
+            self._last_full_text = full_text
+        socketio.emit("transcription_update", {
+            "session_id": session_id,
+            "text": newly_finalized_line or "",
+            "full_text": full_text,
+        })
+
+    def _stream_loop(self, session_id):
+        """Periodic re-transcription on rolling window with stability buffer."""
+        while self.is_running and not self._stream_stop_event.is_set():
+            try:
+                mic_labels = ["Mic 1"] if self.active_channels == 1 else ["Mic 1", "Mic 2"]
+                interim_lines = []
+                newly_finalized_any = None
+                for mic in mic_labels:
+                    audio, window_start_s = self._read_window(mic)
+                    if audio is None:
+                        continue
+                    words = self._transcribe_words(audio)
+                    # Convert from window-relative timestamps to session-absolute timestamps.
+                    abs_words = [
+                        {
+                            "word": w["word"],
+                            "start": float(w["start"]) + float(window_start_s or 0.0),
+                            "end": float(w["end"]) + float(window_start_s or 0.0),
+                        }
+                        for w in words
+                    ]
+                    state = self._ch_state[mic]
+                    pending_words = self._filter_new_words(abs_words, state["committed_end_s"])
+                    state["history"].append(pending_words)
+                    state["last_pending_words"] = pending_words
+                    stable_len = self._stable_prefix_len(list(state["history"]))
+                    new_final_len = max(0, stable_len - self._tail_keep_tokens)
+                    if new_final_len > 0:
+                        new_words = pending_words[:new_final_len]
+                        line = self._commit_words_as_line(mic, new_words)
+                        if line:
+                            newly_finalized_any = line
+
+                    # Always compute an interim tail so the UI updates immediately.
+                    latest_pending = list(state["history"])[-1] if len(state["history"]) > 0 else []
+                    tail_words = latest_pending if latest_pending else []
+                    if tail_words:
+                        state["empty_updates"] = 0
+                        s = tail_words[0]["start"]
+                        e = tail_words[-1]["end"]
+                        text = " ".join(w["word"] for w in tail_words).strip()
+                        interim_lines.append(f"[{self._format_stamp(s)} -> {self._format_stamp(e)}] {mic}: {text}")
+                    else:
+                        state["empty_updates"] += 1
+                        # If speech just ended, preserve the previous pending segment instead of losing it.
+                        if state["empty_updates"] >= 2 and state["last_pending_words"]:
+                            line = self._commit_words_as_line(mic, state["last_pending_words"])
+                            if line:
+                                newly_finalized_any = line
+
+                # Emit: stable lines + current interim tails (non-persisted)
+                full_text = "\n".join(self._lines + interim_lines)
+                # Do not allow empty updates to wipe the UI.
+                if not full_text.strip() and not newly_finalized_any:
+                    continue
+
+                if full_text.strip():
+                    self._last_full_text = full_text
+                self._last_interim_lines = interim_lines
+
+                socketio.emit("transcription_update", {
+                    "session_id": session_id,
+                    "text": newly_finalized_any or "",
+                    "full_text": full_text,
+                    "interim": interim_lines,
+                })
+            except Exception as e:
+                print(f"[Stream] Loop error: {e}")
+            time.sleep(max(0.2, self._update_interval_s))
 
     def _process_segment(self, audio_chunk, speech_start_time, speech_end_time, session_start, queue_wait=0.0):
         if np.mean(np.abs(audio_chunk)) < 1e-4:
@@ -188,17 +421,34 @@ class TranscriptionSession:
 
     def _capture_callback(self, indata, frames, time_info, status):
         if status:
-            print(f"[Session] Stream status: {status}")
+            now = time.time()
+            if now - self._last_stream_status_log_at >= 2.0:
+                print(f"[Session] Stream status: {status}")
+                self._last_stream_status_log_at = now
         if self.is_running and indata is not None and len(indata) > 0:
-            self._audio_queue.put(indata.copy())
-            if indata.ndim == 1 or indata.shape[1] == 1:
-                r1 = float(np.sqrt(np.mean(indata**2)))
-                r2 = 0.0
-            else:
-                r1 = float(np.sqrt(np.mean(indata[:, 0]**2)))
-                r2 = float(np.sqrt(np.mean(indata[:, 1]**2)))
-            with self._rms_lock:
-                self._rms_ch1, self._rms_ch2 = r1, r2
+            # Only feed the old queue in legacy segmentation mode.
+            if not self._stream_mode:
+                self._audio_queue.put(indata.copy())
+
+            now = time.time()
+            if now - self._last_rms_update_at >= RMS_DISPLAY_INTERVAL:
+                if indata.ndim == 1 or indata.shape[1] == 1:
+                    r1 = float(np.sqrt(np.mean(indata**2)))
+                    r2 = 0.0
+                else:
+                    r1 = float(np.sqrt(np.mean(indata[:, 0]**2)))
+                    r2 = float(np.sqrt(np.mean(indata[:, 1]**2)))
+                with self._rms_lock:
+                    self._rms_ch1, self._rms_ch2 = r1, r2
+                self._last_rms_update_at = now
+            # Feed ring buffer for streaming transcription
+            try:
+                if indata.ndim == 1 or indata.shape[1] == 1:
+                    self._append_to_ring(indata.reshape(-1))
+                else:
+                    self._append_to_ring(indata[:, 0], indata[:, 1])
+            except Exception:
+                pass
 
     def _rms_display_loop(self):
         while self.is_running:
@@ -273,9 +523,11 @@ class TranscriptionSession:
                 speaking_chunks = 0
                 speech_start_time = None
 
-    def start(self):
+    def start(self, session_id="default"):
         self.is_running = True
         session_start = time.time()
+        self._stream_start_wall = session_start
+        self._stream_stop_event.clear()
         requested_channels = self.channels_requested
         selected_device = self.device_index
         device = selected_device if selected_device is not None else DEVICE_INDEX
@@ -358,11 +610,21 @@ class TranscriptionSession:
 
         try:
             if use_callback:
-                transcribe_thread = threading.Thread(target=self._run_transcription_worker, args=(session_start,), daemon=True)
-                transcribe_thread.start()
+                if self._stream_mode:
+                    # Start streaming transcription loop (rolling window + overlap)
+                    stream_thread = threading.Thread(target=self._stream_loop, args=(session_id,), daemon=True)
+                    stream_thread.start()
+                else:
+                    transcribe_thread = threading.Thread(target=self._run_transcription_worker, args=(session_start,), daemon=True)
+                    transcribe_thread.start()
                 rms_thread = threading.Thread(target=self._rms_display_loop, daemon=True)
                 rms_thread.start()
-                self._run_worker(session_start)
+                if not self._stream_mode:
+                    self._run_worker(session_start)
+                else:
+                    # In streaming mode, keep thread alive until stop() is called.
+                    while self.is_running and not self._stream_stop_event.is_set():
+                        time.sleep(0.25)
             else:
                 # Blocking read path
                 chunks_per_second = SAMPLE_RATE_CAPTURE / CHUNK
@@ -405,6 +667,7 @@ class TranscriptionSession:
 
     def stop(self):
         self.is_running = False
+        self._stream_stop_event.set()
         if self.stream:
             try:
                 self.stream.stop()
@@ -414,6 +677,10 @@ class TranscriptionSession:
             self.stream = None
 
     def get_full_transcript(self):
+        # In streaming mode, return the last emitted view (stable + interim),
+        # so Stop doesn't come back empty if nothing stabilized yet.
+        if getattr(self, "_stream_mode", False):
+            return self._last_full_text or "\n".join(self._lines) or ""
         with self._transcript_lock:
             return "\n".join(self.transcripts)
 
@@ -524,7 +791,7 @@ def start_transcription():
             })
 
     session.callback = on_transcription
-    thread = threading.Thread(target=session.start, daemon=True)
+    thread = threading.Thread(target=session.start, args=(session_id,), daemon=True)
     thread.start()
 
     return jsonify({

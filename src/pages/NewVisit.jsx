@@ -25,6 +25,76 @@ function formatTranscriptionForDisplay(text, useSpeakerLabels = true) {
   }
   return text.replace(/Mic 1/g, "Patient").replace(/Mic 2/g, "Doctor");
 }
+
+function normalizeTranscriptLineForDedup(line) {
+  return String(line || "")
+    .replace(/^\[[^\]]+\]\s*/, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function parseTranscriptLine(line) {
+  const raw = String(line || "").trim();
+  const match = raw.match(/^\[(\d+):(\d+)\s*(?:->|→)\s*(\d+):(\d+)\]\s*([^:]+):\s*(.*)$/);
+  if (!match) {
+    return {
+      raw,
+      speaker: "",
+      startSeconds: null,
+      endSeconds: null,
+      text: raw,
+      normalized: normalizeTranscriptLineForDedup(raw),
+    };
+  }
+  const [, sm, ss, em, es, speaker, text] = match;
+  return {
+    raw,
+    speaker: String(speaker || "").trim(),
+    startSeconds: Number(sm) * 60 + Number(ss),
+    endSeconds: Number(em) * 60 + Number(es),
+    text: String(text || "").trim(),
+    normalized: normalizeTranscriptLineForDedup(text),
+  };
+}
+
+function shouldReplaceTranscriptLine(existingLine, incomingLine) {
+  const a = parseTranscriptLine(existingLine);
+  const b = parseTranscriptLine(incomingLine);
+  if (!a.speaker || !b.speaker || a.speaker !== b.speaker) return false;
+  if (a.startSeconds == null || b.startSeconds == null || a.endSeconds == null || b.endSeconds == null) return false;
+
+  const overlapsInTime = b.startSeconds <= a.endSeconds + 1 && b.endSeconds >= a.startSeconds - 1;
+  if (!overlapsInTime) return false;
+
+  const aText = a.normalized;
+  const bText = b.normalized;
+  if (!aText || !bText || aText === bText) return false;
+
+  const bContainsA = bText.includes(aText);
+  const samePrefix =
+    aText.startsWith(bText.slice(0, Math.min(12, bText.length))) ||
+    bText.startsWith(aText.slice(0, Math.min(12, aText.length)));
+
+  return bContainsA || (samePrefix && bText.length > aText.length);
+}
+
+function mergeTranscriptLine(lines, incomingLine) {
+  const next = Array.isArray(lines) ? [...lines] : [];
+  const incomingDisplay = String(incomingLine || "").trim();
+  if (!incomingDisplay) return next;
+
+  for (let i = next.length - 1; i >= 0; i -= 1) {
+    const existing = next[i];
+    if (shouldReplaceTranscriptLine(existing, incomingDisplay)) {
+      next[i] = incomingDisplay;
+      return next;
+    }
+  }
+
+  next.push(incomingDisplay);
+  return next;
+}
 export default function NewVisit() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -55,6 +125,10 @@ export default function NewVisit() {
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcriptionError, setTranscriptionError] = useState(null);
   const transcriptionListenerRef = useRef(null);
+  const committedTranscriptRef = useRef("");
+  const committedTranscriptLinesRef = useRef([]);
+  const interimTranscriptRef = useRef("");
+  const seenTranscriptLinesRef = useRef(new Set());
   const jsonlLoggerRef = useRef(null);    // ✅ JSONL logger instance
   const windowStartRef = useRef(null);   // ✅ tracks each window's start time
   const [analysisProgress, setAnalysisProgress] = useState({
@@ -550,13 +624,41 @@ const handleStopFace = async () => {
     if (isTranscribing) {
       transcriptionListenerRef.current = transcriptionService.addListener(async (event, data) => {
         if (event === 'update') {
-          const displayText = formatTranscriptionForDisplay(data.text, useSpeakerLabels);
-          setVisitData(prev => ({
-            ...prev,
-            transcription: prev.transcription
-              ? `${prev.transcription}\n\n${displayText}`.trim()
-              : displayText
-          }));
+          const candidateLines = [];
+          if (Array.isArray(data?.interim)) {
+            candidateLines.push(...data.interim.filter(Boolean).map((x) => String(x).trim()));
+          }
+          if (String(data?.text || "").trim()) {
+            candidateLines.push(String(data.text).trim());
+          }
+          if (String(data?.full_text || "").trim()) {
+            candidateLines.push(
+              ...String(data.full_text)
+                .split(/\r?\n/)
+                .map((x) => x.trim())
+                .filter(Boolean)
+            );
+          }
+
+          const appended = [];
+          for (const rawLine of candidateLines) {
+            const displayLine = formatTranscriptionForDisplay(rawLine, useSpeakerLabels);
+            const key = normalizeTranscriptLineForDedup(displayLine);
+            if (!key || seenTranscriptLinesRef.current.has(key)) continue;
+            seenTranscriptLinesRef.current.add(key);
+            appended.push(displayLine);
+          }
+
+          if (appended.length > 0) {
+            for (const line of appended) {
+              committedTranscriptLinesRef.current = mergeTranscriptLine(committedTranscriptLinesRef.current, line);
+            }
+            committedTranscriptRef.current = committedTranscriptLinesRef.current.join("\n");
+            setVisitData(prev => ({
+              ...prev,
+              transcription: committedTranscriptRef.current
+            }));
+          }
           if (jsonlLoggerRef.current && data.text) {
             const logger = jsonlLoggerRef.current;
             const now = Date.now();
@@ -573,7 +675,20 @@ const handleStopFace = async () => {
 
         } else if (event === 'complete') {
           const displayFull = formatTranscriptionForDisplay(data.full_text || "", useSpeakerLabels);
-          setVisitData(prev => ({ ...prev, transcription: displayFull || prev.transcription }));
+          setVisitData(prev => {
+            const appendOnlyDisplay = committedTranscriptRef.current || "";
+            // Reliability-first: preserve the append-only transcript gathered during
+            // recording. Do not replace it with backend final text, since the
+            // backend committed path is currently dropping segments.
+            if (appendOnlyDisplay.trim().length > 0) {
+              return { ...prev, transcription: appendOnlyDisplay };
+            }
+            if (!displayFull || displayFull.trim().length === 0) {
+              return prev;
+            }
+            return { ...prev, transcription: displayFull };
+          });
+          interimTranscriptRef.current = "";
           setIsTranscribing(false);
 
         } else if (event === 'error') {
@@ -659,6 +774,10 @@ const handleStopFace = async () => {
     try {
       setTranscriptionError(null);
       setIsStartingTranscription(true);
+      committedTranscriptRef.current = "";
+      committedTranscriptLinesRef.current = [];
+      interimTranscriptRef.current = "";
+      seenTranscriptLinesRef.current = new Set();
       await transcriptionService.start(null, {
         deviceIndex: selectedAudioDevice === "default" ? null : Number(selectedAudioDevice),
         channels: Number(channelMode)
@@ -687,12 +806,19 @@ const handleStopFace = async () => {
   const handleStopTranscription = async () => {
     try {
       const result = await transcriptionService.stop();
-      if (result && result.full_text) {
-        setVisitData(prev => ({
-          ...prev,
-          transcription: formatTranscriptionForDisplay(result.full_text, channelMode === "2")
-        }));
-      }
+      setVisitData(prev => {
+        const appendOnlyDisplay = committedTranscriptRef.current || prev.transcription || "";
+        if (appendOnlyDisplay.trim().length > 0) {
+          return { ...prev, transcription: appendOnlyDisplay };
+        }
+        if (result && String(result.full_text || "").trim().length > 0) {
+          return {
+            ...prev,
+            transcription: formatTranscriptionForDisplay(result.full_text, channelMode === "2")
+          };
+        }
+        return prev;
+      });
       setIsTranscribing(false);
       setTranscriptionError(null);
     } catch (error) {
