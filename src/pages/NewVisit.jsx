@@ -120,12 +120,14 @@ export default function NewVisit() {
 
   const ensureWorkingVisitId = () => {
     if (workingVisitIdRef.current) return workingVisitIdRef.current;
-    const uid =
-      (typeof crypto !== "undefined" && crypto.randomUUID)
-        ? crypto.randomUUID()
-        : `visit-${Date.now()}`;
-    workingVisitIdRef.current = uid;
-    return uid;
+    const serials = (Array.isArray(existingVisits) ? existingVisits : [])
+      .flatMap((v) => [v?.visit_number, v?.id])
+      .map((x) => Number.parseInt(String(x), 10))
+      .filter((n) => Number.isFinite(n));
+    const nextSerial = serials.length ? Math.max(...serials) + 1 : 1;
+    const nextId = String(nextSerial);
+    workingVisitIdRef.current = nextId;
+    return nextId;
   };
 
   // Preconnect to transcription server so Start Recording is faster
@@ -809,9 +811,11 @@ const handleStopFace = async () => {
       liveMultimodal = await loadLiveMultimodal(workingVisitId);
 
 
-      const visitNumber = existingVisits.length + 1;
+      const visitNumber = Number.parseInt(ensureWorkingVisitId(), 10) || (existingVisits.length + 1);
+      const visitId = ensureWorkingVisitId();
       
       createVisitMutation.mutate({
+        id: visitId,
         patient_mrn: selectedPatientMrn,
         visit_number: visitNumber,
         ...visitData,

@@ -793,9 +793,18 @@ def _nested_visit_dir(visit_id, patient_mrn):
     return patient_dir / f"visit_{visit_id}"
 
 
-def _iter_nested_visit_dirs(visit_id):
+def _iter_nested_visit_dirs(visit_id, patient_mrn=None):
     if not RUNS_DIR.exists():
         return
+
+    if patient_mrn:
+        patient_dir = _patient_runs_dir(patient_mrn)
+        if patient_dir and patient_dir.exists() and patient_dir.is_dir():
+            candidate = patient_dir / f"visit_{visit_id}"
+            if candidate.exists() and candidate.is_dir():
+                yield candidate
+        return
+
     for child in RUNS_DIR.iterdir():
         if not child.is_dir():
             continue
@@ -804,17 +813,27 @@ def _iter_nested_visit_dirs(visit_id):
             yield candidate
 
 
-def _find_existing_visit_dir(visit_id):
-    for d in _iter_nested_visit_dirs(visit_id):
+def _find_existing_visit_dir(visit_id, patient_mrn=None):
+    for d in _iter_nested_visit_dirs(visit_id, patient_mrn=patient_mrn):
         return d
     legacy = _legacy_visit_dir(visit_id)
     if legacy.exists() and legacy.is_dir():
-        return legacy
+        if not patient_mrn:
+            return legacy
+        meta = _read_json_file(legacy / "visit_metadata.json") or {}
+        manifest = _read_manifest_from_dir(legacy) or {}
+        legacy_mrn = (
+            str(meta.get("patient_mrn") or manifest.get("patient_mrn") or "")
+            .strip()
+            .lower()
+        )
+        if legacy_mrn and legacy_mrn == str(patient_mrn).strip().lower():
+            return legacy
     return None
 
 
 def _resolve_visit_dir(visit_id, patient_mrn=None, create=False):
-    existing = _find_existing_visit_dir(visit_id)
+    existing = _find_existing_visit_dir(visit_id, patient_mrn=patient_mrn)
     if existing:
         return existing
 
@@ -1416,8 +1435,6 @@ def integrate_visit(visit_id):
 # Add this block to app.py right above the  if __name__ == '__main__':  line.
 # ═══════════════════════════════════════════════════════════════════════════════
 
-import uuid
-
 # ── Paths ────────────────────────────────────────────────────────────────────
 # REPO_ROOT is already defined above as Path(__file__).resolve().parent.parent
 # RUNS_DIR  change:  was Path("runs")  →  now REPO_ROOT / "runs"
@@ -1447,8 +1464,8 @@ def _write_patients(data):
     PATIENTS_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
-def _read_visit_metadata(visit_id):
-    path = _resolve_visit_dir(visit_id, create=False) / "visit_metadata.json"
+def _read_visit_metadata(visit_id, patient_mrn=None):
+    path = _resolve_visit_dir(visit_id, patient_mrn=patient_mrn, create=False) / "visit_metadata.json"
     if not path.exists():
         return None
     try:
@@ -1488,6 +1505,24 @@ def _all_visits():
             except Exception:
                 pass
     return results
+
+
+def _next_visit_serial(patient_mrn):
+    """Return next per-patient visit serial as a string."""
+    visits = [
+        v for v in _all_visits()
+        if str(v.get("patient_mrn", "")).strip().lower() == str(patient_mrn or "").strip().lower()
+    ]
+    max_n = 0
+    for v in visits:
+        for candidate in (v.get("visit_number"), v.get("id")):
+            try:
+                n = int(str(candidate).strip())
+                if n > max_n:
+                    max_n = n
+            except Exception:
+                continue
+    return str(max_n + 1)
 
 
 def _read_json_file(path: Path):
@@ -1647,15 +1682,26 @@ def list_visits():
 def create_visit():
     data = request.get_json(silent=True) or {}
     now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-    visit_id = data.get("id") or str(uuid.uuid4())
     patient_mrn = data.get("patient_mrn")
     if not patient_mrn:
         return jsonify({"error": "patient_mrn is required"}), 400
+    visit_id = str(data.get("id") or _next_visit_serial(patient_mrn)).strip()
+    if not visit_id:
+        visit_id = _next_visit_serial(patient_mrn)
+    if _read_visit_metadata(visit_id, patient_mrn=patient_mrn) is not None:
+        return jsonify({"error": "visit_id already exists"}), 409
+    visit_number = data.get("visit_number")
+    if visit_number in (None, ""):
+        try:
+            visit_number = int(visit_id)
+        except Exception:
+            visit_number = int(_next_visit_serial(patient_mrn))
 
     visit_metadata = {
         **data,
         "id": visit_id,
         "patient_mrn": patient_mrn,
+        "visit_number": visit_number,
         "created_date": data.get("created_date") or now,
         "updated_date": now,
     }
@@ -1723,15 +1769,12 @@ def delete_visit(visit_id):
 
 @app.route('/api/dev/clear', methods=['POST'])
 def dev_clear():
-    """Dev-only: wipe patients.json and all visit_metadata.json files."""
+    """Dev-only: wipe patients.json and all visit artifacts."""
     if PATIENTS_FILE.exists():
         PATIENTS_FILE.unlink()
     if RUNS_DIR.exists():
-        for meta in RUNS_DIR.rglob("visit_metadata.json"):
-            try:
-                meta.unlink()
-            except Exception:
-                pass
+        shutil.rmtree(RUNS_DIR, ignore_errors=True)
+    RUNS_DIR.mkdir(parents=True, exist_ok=True)
     return jsonify({"status": "cleared"})
 if __name__ == '__main__':
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
