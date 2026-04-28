@@ -20,21 +20,21 @@ import { format, differenceInYears } from "date-fns";
 export default function PatientAnalysis() {
   const navigate = useNavigate();
   const urlParams = new URLSearchParams(window.location.search);
-  const patientId = urlParams.get("id");
+  const patientMrn = urlParams.get("mrn");
 
   const { data: patient, isLoading: patientLoading } = useQuery({
-    queryKey: ["patient", patientId],
+    queryKey: ["patient", patientMrn],
     queryFn: async () => {
-      const patients = await api.entities.Patient.filter({ id: patientId });
+      const patients = await api.entities.Patient.filter({ medical_record_number: patientMrn });
       return patients[0];
     },
-    enabled: !!patientId,
+    enabled: !!patientMrn,
   });
 
   const { data: visits = [], isLoading: visitsLoading } = useQuery({
-    queryKey: ["visits", patientId],
-    queryFn: () => api.entities.Visit.filter({ patient_id: patientId }, "-visit_date"),
-    enabled: !!patientId,
+    queryKey: ["visits", patientMrn],
+    queryFn: () => api.entities.Visit.filter({ patient_mrn: patientMrn }, "-visit_date"),
+    enabled: !!patientMrn,
   });
 
   const visitsChrono = useMemo(() => {
@@ -87,7 +87,7 @@ export default function PatientAnalysis() {
             >
               <Link
                 to={createPageUrl(
-                  `ReportSerialTrends?patientId=${encodeURIComponent(patientId)}${
+                  `ReportSerialTrends?patientId=${encodeURIComponent(patientMrn || "")}${
                     latestVisitId ? `&visitId=${encodeURIComponent(latestVisitId)}` : ""
                   }`
                 )}

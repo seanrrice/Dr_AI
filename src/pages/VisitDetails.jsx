@@ -126,7 +126,7 @@ function SubsystemReport({ visitId }) {
             Normally, face analysis should be started from the New Visit page.
           </p>
           <pre className="text-xs bg-white border border-slate-200 rounded px-2 py-1 text-slate-600 whitespace-pre-wrap select-all">
-{`python emotion_pipeline/webcam_emotion_mediapipe.py --visit_id ${visitId} --patient_id <patient_id> --runs_dir DrAITranscription/runs`}
+{`python emotion_pipeline/webcam_emotion_mediapipe.py --visit_id ${visitId} --patient_mrn <patient_mrn> --runs_dir DrAITranscription/runs`}
           </pre>
           <p className="text-xs text-slate-400 mt-1"></p>
         </div>
@@ -173,7 +173,7 @@ function SubsystemReport({ visitId }) {
           ) : (
             <PendingTab
               name="Facial"
-              hint={`Face teammate needs to run:\npython webcam_emotion_mediapipe.py --visit_id ${visitId} --patient_id <patient_id> --runs_dir ../DrAITranscription/runs`}
+              hint={`Face teammate needs to run:\npython webcam_emotion_mediapipe.py --visit_id ${visitId} --patient_mrn <patient_mrn> --runs_dir ../DrAITranscription/runs`}
             />
           )
         )}
@@ -413,12 +413,12 @@ export default function VisitDetails() {
   });
 
   const { data: patient } = useQuery({
-    queryKey: ['patient', visit?.patient_id],
+    queryKey: ['patient', visit?.patient_mrn],
     queryFn: async () => {
-      const patients = await api.entities.Patient.filter({ id: visit.patient_id });
+      const patients = await api.entities.Patient.filter({ medical_record_number: visit.patient_mrn });
       return patients[0];
     },
-    enabled: !!visit?.patient_id
+    enabled: !!visit?.patient_mrn
   });
 
   const handleExportPDF = async () => {

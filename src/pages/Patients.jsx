@@ -56,14 +56,14 @@ export default function Patients() {
   });
 
   const deletePatientMutation = useMutation({
-    mutationFn: async (patientId) => {
+    mutationFn: async (patientMrn) => {
       // delete all visits associated with this patient
-      const patientVisits = visits.filter(v => v.patient_id === patientId);
+      const patientVisits = visits.filter(v => v.patient_mrn === patientMrn);
       await Promise.all(
         patientVisits.map(visit => api.entities.Visit.delete(visit.id))
       );
       // delete the patient
-      return api.entities.Patient.delete(patientId);
+      return api.entities.Patient.delete(patientMrn);
     },
     onSuccess: () => {
       queryClient.invalidateQueries(['patients']);
@@ -73,12 +73,13 @@ export default function Patients() {
   });
 
   const handleCreatePatient = () => {
+    if (!String(newPatient.medical_record_number || "").trim()) return;
     createPatientMutation.mutate(newPatient);
   };
 
   const handleDeletePatient = () => {
     if (deleteConfirmDialog.patient) {
-      deletePatientMutation.mutate(deleteConfirmDialog.patient.id);
+      deletePatientMutation.mutate(deleteConfirmDialog.patient.medical_record_number);
     }
   };
 
@@ -86,8 +87,8 @@ export default function Patients() {
     return differenceInYears(new Date(), new Date(dob));
   };
 
-  const getPatientVisitCount = (patientId) => {
-    return visits.filter(v => v.patient_id === patientId).length;
+  const getPatientVisitCount = (patientMrn) => {
+    return visits.filter(v => v.patient_mrn === patientMrn).length;
   };
 
   const filteredPatients = patients.filter(patient => {
@@ -162,12 +163,13 @@ export default function Patients() {
                   </Select>
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="mrn">Medical Record Number</Label>
+                  <Label htmlFor="mrn">Medical Record Number *</Label>
                   <Input
                     id="mrn"
                     value={newPatient.medical_record_number}
                     onChange={(e) => setNewPatient({...newPatient, medical_record_number: e.target.value})}
                     placeholder="MRN-12345"
+                    required
                   />
                 </div>
                 <div className="space-y-2">
@@ -191,7 +193,7 @@ export default function Patients() {
               </div>
               <div className="flex justify-end gap-3">
                 <Button variant="outline" onClick={() => setShowAddDialog(false)}>Cancel</Button>
-                <Button className="bg-teal-600 hover:bg-teal-700" onClick={handleCreatePatient} disabled={!newPatient.first_name || !newPatient.last_name || !newPatient.date_of_birth}>
+                <Button className="bg-teal-600 hover:bg-teal-700" onClick={handleCreatePatient} disabled={!newPatient.first_name || !newPatient.last_name || !newPatient.date_of_birth || !String(newPatient.medical_record_number || '').trim()}>
                   Create Patient
                 </Button>
               </div>
@@ -233,9 +235,9 @@ export default function Patients() {
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {filteredPatients.map((patient) => (
-                  <div key={patient.id} className="relative group">
+                  <div key={patient.medical_record_number} className="relative group">
                     <Link
-                      to={createPageUrl(`PatientAnalysis?id=${patient.id}`)}
+                      to={createPageUrl(`PatientAnalysis?mrn=${encodeURIComponent(patient.medical_record_number || "")}`)}
                       className="block"
                     >
                       <div className="p-5 border border-teal-200 rounded-lg hover:bg-teal-50/50 hover:border-teal-300 transition-all">
@@ -263,7 +265,7 @@ export default function Patients() {
                         <div className="flex items-center justify-between pt-3 border-t border-teal-100">
                           <div className="flex items-center gap-2 text-sm text-teal-800">
                             <TrendingUp className="w-4 h-4 text-teal-600" />
-                            <span>{getPatientVisitCount(patient.id)} visits</span>
+                            <span>{getPatientVisitCount(patient.medical_record_number)} visits</span>
                           </div>
                           <span className="text-xs text-teal-600">
                             Added {format(new Date(patient.created_date), 'MMM d, yyyy')}
@@ -298,7 +300,7 @@ export default function Patients() {
               <DialogTitle>Delete Patient</DialogTitle>
               <DialogDescription>
                 Are you sure you want to delete {deleteConfirmDialog.patient?.first_name} {deleteConfirmDialog.patient?.last_name}?
-                This will permanently delete the patient and all associated visit records ({getPatientVisitCount(deleteConfirmDialog.patient?.id || '')} visits).
+                This will permanently delete the patient and all associated visit records ({getPatientVisitCount(deleteConfirmDialog.patient?.medical_record_number || '')} visits).
                 This action cannot be undone.
               </DialogDescription>
             </DialogHeader>

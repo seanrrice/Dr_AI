@@ -62,7 +62,7 @@ def make_face_bar_chart(emotion_pct: dict, out_path: Path) -> None:
     plt.savefig(out_path, dpi=200)
     plt.close()
 
-def load_face_history_for_patient(runs_dir: Path, patient_id: str) -> pd.DataFrame:
+def load_face_history_for_patient(runs_dir: Path, patient_mrn: str) -> pd.DataFrame:
     """
     Load all face summary records across all visits for one patient.
     Returns a DataFrame sorted by timestamp.
@@ -79,7 +79,7 @@ def load_face_history_for_patient(runs_dir: Path, patient_id: str) -> pd.DataFra
         for record in face_records:
             if record.get("type") != "summary":
                 continue
-            if record.get("patient_id") != patient_id:
+            if (record.get("patient_mrn") or record.get("patient_id")) != patient_mrn:
                 continue
             features = record.get("features", {})
             emotion_counts = features.get("emotion_counts", {})
@@ -87,7 +87,7 @@ def load_face_history_for_patient(runs_dir: Path, patient_id: str) -> pd.DataFra
 
             flat = {
                 "visit_id": record.get("visit_id"),
-                "patient_id": record.get("patient_id"),
+                "patient_mrn": record.get("patient_mrn") or record.get("patient_id"),
                 "phase": record.get("phase"),
                 "t_start": record.get("t_start"),
                 "t_end": record.get("t_end"),
@@ -163,7 +163,7 @@ def make_face_trend_plot(history_df: pd.DataFrame, out_path: Path) -> None:
             linewidth=2,
         )
 
-    plt.title(f"Face Emotion Trends Across Visits - Patient {history_df.iloc[0]['patient_id']}")
+    plt.title(f"Face Emotion Trends Across Visits - Patient {history_df.iloc[0]['patient_mrn']}")
     plt.xlabel("Visit Number")
     plt.ylabel("Percentage (0-100)")
     plt.legend()
@@ -174,12 +174,12 @@ def make_face_trend_plot(history_df: pd.DataFrame, out_path: Path) -> None:
     plt.savefig(out_path, dpi=200)
     plt.close()
 
-def build_face_serial_trends(runs_dir: Path, patient_id: str, current_visit_dir: Path) -> tuple[dict, dict]:
+def build_face_serial_trends(runs_dir: Path, patient_mrn: str, current_visit_dir: Path) -> tuple[dict, dict]:
     """
     Returns:
         serial_trends_section, figures_dict
     """
-    history_df = load_face_history_for_patient(runs_dir, patient_id)
+    history_df = load_face_history_for_patient(runs_dir, patient_mrn)
 
     if history_df.empty:
         return (
@@ -334,18 +334,18 @@ def build_report(visit_dir: Path, manifest: dict, runs_dir: Path) -> dict:
 
     availability = compute_availability(face_section, audio_section, gait_section)
 
-    patient_id = manifest.get("patient_id")
-    if patient_id:
+    patient_mrn = manifest.get("patient_mrn") or manifest.get("patient_id")
+    if patient_mrn:
         face_serial_section, face_serial_figures = build_face_serial_trends(
             runs_dir=runs_dir,
-            patient_id=patient_id,
+            patient_mrn=patient_mrn,
             current_visit_dir=visit_dir,
         )
     else:
         face_serial_section, face_serial_figures = (
             {
                 "status": "missing",
-                "message": "No patient_id in manifest; cannot compute serial trends"
+                "message": "No patient_mrn in manifest; cannot compute serial trends"
             },
             {}
         )
@@ -354,7 +354,7 @@ def build_report(visit_dir: Path, manifest: dict, runs_dir: Path) -> dict:
         "schema_version": "v0.1",
         "generated_utc": safe_now_iso(),
         "visit_id": manifest.get("visit_id"),
-        "patient_id": manifest.get("patient_id"),
+        "patient_mrn": manifest.get("patient_mrn") or manifest.get("patient_id"),
         "visit_label": manifest.get("visit_label"),
         "manifest_created_utc": manifest.get("created_utc"),
         "phases": manifest.get("phases", {}),

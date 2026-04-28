@@ -156,12 +156,10 @@ function drawVisitInfoTwoCol(doc, margin, yRef, maxWidth, visitMeta, patient, pa
   };
   row("Visit ID", visitMeta?.visitId, leftX);
   ty = yRef.y + 5;
-  row("Patient ID", visitMeta?.patientId, rightX);
+  row("MRN", patient?.medical_record_number || visitMeta?.patientId, rightX);
   ty = yRef.y + 15.2;
   const name = patient ? `${patient.first_name || ""} ${patient.last_name || ""}`.trim() : "Unknown Patient";
   row("Patient name", name || "—", leftX);
-  ty = yRef.y + 15.2;
-  row("MRN", patient?.medical_record_number || "—", rightX);
   doc.setTextColor(0, 0, 0);
   yRef.y += boxH + 3;
 }

@@ -44,7 +44,7 @@ def _mjpeg_generator():
         time.sleep(1 / 30.0)
 
 
-def save_gait_jsonl(summary, jsonl_path, visit_id=None, patient_id=None):
+def save_gait_jsonl(summary, jsonl_path, visit_id=None, patient_mrn=None):
     """
     Saves gait output as JSONL.
     Each line is one JSON object.
@@ -60,7 +60,7 @@ def save_gait_jsonl(summary, jsonl_path, visit_id=None, patient_id=None):
         "event": "gait_session_start",
         "subsystem": "gait",
         "visit_id": visit_id,
-        "patient_id": patient_id,
+        "patient_mrn": patient_mrn,
         "timestamp_unix": timestamp_start,
         "timestamp_readable": time.strftime("%Y-%m-%d %H:%M:%S")
     }
@@ -69,7 +69,7 @@ def save_gait_jsonl(summary, jsonl_path, visit_id=None, patient_id=None):
         "event": "gait_summary",
         "subsystem": "gait",
         "visit_id": visit_id,
-        "patient_id": patient_id,
+        "patient_mrn": patient_mrn,
         "timestamp_unix": time.time(),
         "metrics": {
             "num_steps_est": summary.get("num_steps_est"),
@@ -102,7 +102,7 @@ def save_gait_jsonl(summary, jsonl_path, visit_id=None, patient_id=None):
         "event": "gait_session_end",
         "subsystem": "gait",
         "visit_id": visit_id,
-        "patient_id": patient_id,
+        "patient_mrn": patient_mrn,
         "timestamp_unix": time.time(),
         "timestamp_readable": time.strftime("%Y-%m-%d %H:%M:%S")
     }
@@ -129,7 +129,7 @@ def api_gait():
 
         # Optional visit/patient IDs for report generation
         visit_id = request.args.get("visit_id", default=None, type=str)
-        patient_id = request.args.get("patient_id", default=None, type=str)
+        patient_mrn = request.args.get("patient_mrn", default=None, type=str)
 
         ts = time.strftime("%Y%m%d_%H%M%S")
 
@@ -168,7 +168,7 @@ def api_gait():
             summary=summary,
             jsonl_path=jsonl_path,
             visit_id=visit_id,
-            patient_id=patient_id
+            patient_mrn=patient_mrn
         )
 
         return jsonify({

@@ -5,7 +5,7 @@
  * Method signatures are identical to the old localStorage version so
  * no page components need to change.
  *
- * Demo seed data lives in Flask (see app.py seed_demo_data()).
+ * No hardcoded demo patient data is used.
  */
 
 const FLASK = 'http://localhost:5000';

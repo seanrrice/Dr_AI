@@ -22,11 +22,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { generateCombinedReportPDF } from "@/utils/combinedReportPdf";
-import {
-  DEMO_REPORT_VISIT_ID,
-  getReportDemoPackage,
-} from "@/data/reportSummaryDemoData";
-import { buildMichaelSerialStorageVisits } from "@/data/michaelSerialVisitStorageSeeds";
 import VisitTranscriptionNlpPanel from "@/components/VisitTranscriptionNlpPanel";
 
 ChartJS.register(
@@ -246,7 +241,7 @@ function AiDiagnosticAssessmentPanel({ assessment }) {
 export default function ReportSummary() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const visitIdParam = searchParams.get("visitId") || DEMO_REPORT_VISIT_ID;
+  const visitIdParam = searchParams.get("visitId") || "";
   const reportSource = searchParams.get("source") || "";
   const isPreviousReportVisual = reportSource === "previous-report-visual";
 
@@ -259,12 +254,11 @@ export default function ReportSummary() {
     enabled: !!visitIdParam && !isPreviousReportVisual,
   });
 
-  const reportPkg = useMemo(() => getReportDemoPackage(visitIdParam), [visitIdParam]);
-  const michaelSerialSeededVisits = useMemo(() => buildMichaelSerialStorageVisits(), []);
-  const seededVisit = useMemo(
-    () => michaelSerialSeededVisits.find((v) => v.id === visitIdParam),
-    [michaelSerialSeededVisits, visitIdParam]
+  const reportPkg = useMemo(
+    () => ({ face: [], audio: [], gait: [], aiAssessment: null, transcriptionNlp: {}, visitSnapshot: {} }),
+    []
   );
+  const seededVisit = null;
   const face = isPreviousReportVisual
     ? reportPkg.face
     : (loadedVisit?.multimodal_jsonl?.face || []);
@@ -280,27 +274,27 @@ export default function ReportSummary() {
   const [reportTab, setReportTab] = useState("multimodal");
   const [keywordView, setKeywordView] = useState("diagnostic");
 
-  const patientIdForTrends = isPreviousReportVisual
-    ? (loadedVisit?.patient_id ?? seededVisit?.patient_id ?? reportPkg.face?.[0]?.patient_id ?? "")
-    : (loadedVisit?.patient_id ?? "");
+  const patientMrnForTrends = isPreviousReportVisual
+    ? (loadedVisit?.patient_mrn ?? seededVisit?.patient_mrn ?? reportPkg.face?.[0]?.patient_mrn ?? "")
+    : (loadedVisit?.patient_mrn ?? "");
 
   const { data: patient } = useQuery({
-    queryKey: ["patient", patientIdForTrends],
+    queryKey: ["patient", patientMrnForTrends],
     queryFn: async () => {
-      const rows = await api.entities.Patient.filter({ id: patientIdForTrends });
+      const rows = await api.entities.Patient.filter({ medical_record_number: patientMrnForTrends });
       return rows[0];
     },
-    enabled: !!patientIdForTrends && !isPreviousReportVisual,
+    enabled: !!patientMrnForTrends && !isPreviousReportVisual,
   });
 
   const { data: patientVisits = [] } = useQuery({
-    queryKey: ["patient-visits-for-pdf", patientIdForTrends],
+    queryKey: ["patient-visits-for-pdf", patientMrnForTrends],
     queryFn: async () => {
-      if (!patientIdForTrends) return [];
-      const rows = await api.entities.Visit.filter({ patient_id: patientIdForTrends });
+      if (!patientMrnForTrends) return [];
+      const rows = await api.entities.Visit.filter({ patient_mrn: patientMrnForTrends });
       return Array.isArray(rows) ? rows : [];
     },
-    enabled: !!patientIdForTrends && !isPreviousReportVisual,
+    enabled: !!patientMrnForTrends && !isPreviousReportVisual,
   });
 
   const serialVisitsForPdf = useMemo(() => {
@@ -322,16 +316,12 @@ export default function ReportSummary() {
   }, [isPreviousReportVisual, patientVisits]);
 
   const patientDisplayName = useMemo(() => {
-    if (isPreviousReportVisual) {
-      if (patientIdForTrends === "patient-demo-1") return "Michael Reyes";
-      if (patientIdForTrends === "patient-demo-2") return "Sarah Martinez";
-    }
     const visitPatientName =
       loadedVisit?.patient_name;
     if (!patient) return visitPatientName || "Unknown Patient";
     const fullName = [patient.first_name, patient.last_name].filter(Boolean).join(" ").trim();
     return fullName || visitPatientName || "Unknown Patient";
-  }, [patient, patientIdForTrends, isPreviousReportVisual, loadedVisit]);
+  }, [patient, patientMrnForTrends, isPreviousReportVisual, loadedVisit]);
 
   const patientMrn = useMemo(() => {
     const mrn = patient?.medical_record_number;
@@ -422,7 +412,7 @@ export default function ReportSummary() {
       if (loadedVisit) {
         return {
           visitId: visitIdParam,
-          patientId: loadedVisit.patient_id ?? "—",
+          patientId: loadedVisit.patient_mrn ?? "—",
         };
       }
       return null;
@@ -430,7 +420,7 @@ export default function ReportSummary() {
     const first = allRecs[0];
     return {
       visitId: visitIdParam,
-      patientId: loadedVisit?.patient_id ?? (isPreviousReportVisual ? seededVisit?.patient_id : null) ?? first.patient_id ?? "—",
+      patientId: loadedVisit?.patient_mrn ?? (isPreviousReportVisual ? seededVisit?.patient_mrn : null) ?? first.patient_mrn ?? "—",
     };
   }, [face, audio, gait, visitIdParam, loadedVisit, seededVisit, isPreviousReportVisual]);
 
@@ -839,7 +829,7 @@ export default function ReportSummary() {
           </Button>
           <Link
             to={createPageUrl(
-              `ReportSerialTrends?patientId=${encodeURIComponent(patientIdForTrends)}&visitId=${encodeURIComponent(visitIdParam)}${
+              `ReportSerialTrends?patientId=${encodeURIComponent(patientMrnForTrends)}&visitId=${encodeURIComponent(visitIdParam)}${
                 isPreviousReportVisual ? "&source=previous-report-visual" : ""
               }`
             )}

@@ -194,7 +194,7 @@ export class AudioJsonlLogger {
   _envelope(type, timeFields) {
     return {
       visit_id: this.visitId,
-      patient_id: this.patientId,
+      patient_mrn: this.patientId,
       subsystem: 'audio',
       phase: this.phase,
       type,

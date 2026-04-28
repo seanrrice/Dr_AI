@@ -63,7 +63,7 @@ def main():
     availability = {"audio": "pending", "face": "pending", "gait": "pending"}
     sections = {}
     visit_id = visit_dir.name.replace("visit_", "")
-    patient_id = None
+    patient_mrn = None
 
     # ── Audio ──────────────────────────────────────────────────────────────────
     audio_records = load_jsonl(visit_dir / "audio.jsonl")
@@ -143,7 +143,7 @@ def main():
             "record_count": len(audio_records),
         }
         availability["audio"] = "available"
-        patient_id = patient_id or (summary or {}).get("patient_id")
+        patient_mrn = patient_mrn or (summary or {}).get("patient_mrn") or (summary or {}).get("patient_id")
         print(f"[Integrator] Audio: {len(audio_records)} records, {len(windows)} windows, distress={overall_distress}, trajectory={trajectory}")
 
     # ── Face ───────────────────────────────────────────────────────────────────
@@ -167,7 +167,7 @@ def main():
             "features": features,
         }
         availability["face"] = "available"
-        patient_id = patient_id or (summary or {}).get("patient_id")
+        patient_mrn = patient_mrn or (summary or {}).get("patient_mrn") or (summary or {}).get("patient_id")
         print(f"[Integrator] Face: dominant={dominant}, samples={features.get('total_samples', 0)}")
 
     # ── Gait ───────────────────────────────────────────────────────────────────
@@ -183,7 +183,7 @@ def main():
         "schema_version": "v0.1",
         "generated_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "visit_id": visit_id,
-        "patient_id": patient_id,
+        "patient_mrn": patient_mrn,
         "partial": any(v == "pending" for v in availability.values()),
         "availability": availability,
         "sections": sections,

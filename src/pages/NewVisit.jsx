@@ -29,7 +29,7 @@ export default function NewVisit() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   
-  const [selectedPatientId, setSelectedPatientId] = useState("");
+  const [selectedPatientMrn, setSelectedPatientMrn] = useState("");
   const [visitData, setVisitData] = useState({
     visit_date: new Date().toISOString().split('T')[0],
     chief_complaint: "",
@@ -107,16 +107,16 @@ export default function NewVisit() {
   });
 
   const { data: existingVisits = [] } = useQuery({
-    queryKey: ['visits', selectedPatientId],
-    queryFn: () => api.entities.Visit.filter({ patient_id: selectedPatientId }),
-    enabled: !!selectedPatientId
+    queryKey: ['visits', selectedPatientMrn],
+    queryFn: () => api.entities.Visit.filter({ patient_mrn: selectedPatientMrn }),
+    enabled: !!selectedPatientMrn
   });
 
   useEffect(() => {
     workingVisitIdRef.current = null;
     setActiveCaptureVisitId("");
     activeVisitIdRef.current = null;
-  }, [selectedPatientId]);
+  }, [selectedPatientMrn]);
 
   const ensureWorkingVisitId = () => {
     if (workingVisitIdRef.current) return workingVisitIdRef.current;
@@ -265,7 +265,7 @@ export default function NewVisit() {
   //====== Face analysis handlers =====================
 
   const handleStartFace = async () => {
-  if (!selectedPatientId) {
+  if (!selectedPatientMrn) {
     alert("Please select a patient before starting facial analysis.");
     return;
   }
@@ -278,7 +278,7 @@ export default function NewVisit() {
     await fetch(`http://localhost:5000/api/visits/${workingVisitId}/create`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ patient_id: selectedPatientId })
+      body: JSON.stringify({ patient_mrn: selectedPatientMrn })
     });
 
     startManifestPolling(workingVisitId);
@@ -289,7 +289,7 @@ export default function NewVisit() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         visit_id: workingVisitId,
-        patient_id: selectedPatientId,
+        patient_mrn: selectedPatientMrn,
         camera_index: Number(cameraIndex),
       })
     });
@@ -342,7 +342,7 @@ const handleStopFace = async () => {
       subsystem: 'gait',
       phase: 'entry',
       visit_id: visitId,
-      patient_id: patientId || '',
+      patient_mrn: patientId || '',
       t_start: 0,
       t_end: Number.isFinite(dur) ? dur : 0,
       valid: true,
@@ -373,7 +373,7 @@ const handleStopFace = async () => {
   };
 
   const handleStartGait = async () => {
-    if (!selectedPatientId) {
+    if (!selectedPatientMrn) {
       alert('Please select a patient before starting gait / motion analysis.');
       return;
     }
@@ -388,7 +388,7 @@ const handleStopFace = async () => {
         await fetch(`http://localhost:5000/api/visits/${workingVisitId}/create`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ patient_id: selectedPatientId }),
+          body: JSON.stringify({ patient_mrn: selectedPatientMrn }),
         });
         startManifestPolling(workingVisitId);
         setActiveCaptureVisitId(workingVisitId);
@@ -414,7 +414,7 @@ const handleStopFace = async () => {
             gait_overlay_video_url: summary.overlay_video_url || '',
           }));
 
-          const record = buildGaitJsonlRecord(summary, workingVisitId, selectedPatientId);
+          const record = buildGaitJsonlRecord(summary, workingVisitId, selectedPatientMrn);
           try {
             const flushRes = await fetch(
               `http://localhost:5000/api/visits/${workingVisitId}/logs/gait`,
@@ -422,7 +422,7 @@ const handleStopFace = async () => {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                  patient_id: selectedPatientId,
+                  patient_mrn: selectedPatientMrn,
                   records: [record],
                 }),
               }
@@ -513,7 +513,7 @@ const handleStopFace = async () => {
     mutationFn: (patientData) => api.entities.Patient.create(patientData),
     onSuccess: (newPatient) => {
       queryClient.invalidateQueries(['patients']);
-      setSelectedPatientId(newPatient.id);
+      setSelectedPatientMrn(newPatient.medical_record_number || "");
       setShowNewPatientDialog(false);
       setNewPatient({
         first_name: "",
@@ -539,7 +539,7 @@ const handleStopFace = async () => {
           await fetch('http://localhost:5000/api/visits/rename', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ from: fromVisitId, to: visit.id, patient_id: selectedPatientId })
+            body: JSON.stringify({ from: fromVisitId, to: visit.id, patient_mrn: selectedPatientMrn })
           });
         }
       } catch (err) {
@@ -565,6 +565,7 @@ const handleStopFace = async () => {
   });
 
   const handleCreatePatient = () => {
+    if (!String(newPatient.medical_record_number || "").trim()) return;
     createPatientMutation.mutate(newPatient);
   };
 
@@ -582,7 +583,7 @@ const handleStopFace = async () => {
       const workingVisitId = ensureWorkingVisitId();
       jsonlLoggerRef.current = new AudioJsonlLogger({
         visitId: workingVisitId || `session_${t0}`,
-        patientId: selectedPatientId || 'unknown',
+        patientId: selectedPatientMrn || 'unknown',
         t0,
       });
       windowStartRef.current = t0;
@@ -648,7 +649,7 @@ const handleStopFace = async () => {
   };
 
   const analyzeTranscription = async () => {
-    if (!selectedPatientId) return;
+    if (!selectedPatientMrn) return;
 
     // Create visit folder in Flask and start manifest polling
     try {
@@ -656,7 +657,7 @@ const handleStopFace = async () => {
       await fetch(`http://localhost:5000/api/visits/${workingVisitId}/create`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ patient_id: selectedPatientId })
+        body: JSON.stringify({ patient_mrn: selectedPatientMrn })
       });
       startManifestPolling(workingVisitId);
       setActiveCaptureVisitId(workingVisitId);
@@ -746,7 +747,7 @@ const handleStopFace = async () => {
           const t0 = Date.now();
           jsonlLoggerRef.current = new AudioJsonlLogger({
             visitId: workingVisitId,
-            patientId: selectedPatientId,
+            patientId: selectedPatientMrn,
             t0,
           });
 
@@ -770,7 +771,7 @@ const handleStopFace = async () => {
             const t0 = Date.now();
             jsonlLoggerRef.current = new AudioJsonlLogger({
               visitId: workingVisitId,
-              patientId: selectedPatientId,
+              patientId: selectedPatientMrn,
               t0,
             });
           }
@@ -811,7 +812,7 @@ const handleStopFace = async () => {
       const visitNumber = existingVisits.length + 1;
       
       createVisitMutation.mutate({
-        patient_id: selectedPatientId,
+        patient_mrn: selectedPatientMrn,
         visit_number: visitNumber,
         ...visitData,
         temperature_unit: tempUnit, 
@@ -892,13 +893,13 @@ const handleStopFace = async () => {
             <div className="space-y-2">
               <Label htmlFor="patient" className="text-sm font-medium text-teal-900">Select Patient *</Label>
               <div className="flex gap-2">
-                <Select value={selectedPatientId} onValueChange={setSelectedPatientId}>
+                <Select value={selectedPatientMrn} onValueChange={setSelectedPatientMrn}>
                   <SelectTrigger className="flex-1 border-teal-200 bg-white/90 focus:ring-teal-500 data-[placeholder]:text-teal-600/60">
                     <SelectValue placeholder="Choose a patient" />
                   </SelectTrigger>
                   <SelectContent className="border-teal-200">
                     {patients.map((patient) => (
-                      <SelectItem key={patient.id} value={patient.id}>
+                      <SelectItem key={patient.medical_record_number} value={patient.medical_record_number}>
                         {patient.first_name} {patient.last_name} {patient.medical_record_number && `(MRN: ${patient.medical_record_number})`}
                       </SelectItem>
                     ))}
@@ -1190,7 +1191,7 @@ const handleStopFace = async () => {
                 <div className="relative bg-black rounded overflow-hidden" style={{ aspectRatio: '4/3' }}>
                   {isFaceRunning ? (
                     <img
-                      src={`${FLASK_URL}/api/face/live/${activeCaptureVisitId || selectedPatientId}?t=${Date.now()}`}
+                      src={`${FLASK_URL}/api/face/live/${activeCaptureVisitId || selectedPatientMrn}?t=${Date.now()}`}
                       alt="Live facial analysis"
                       className="w-full h-full object-cover"
                     />
@@ -1411,7 +1412,7 @@ const handleStopFace = async () => {
               </div>
               <Button
                 onClick={analyzeTranscription}
-                disabled={!selectedPatientId || isAnalyzing}
+                disabled={!selectedPatientMrn || isAnalyzing}
                 className="bg-teal-600 hover:bg-teal-700"
               >
                 {isAnalyzing ? (
@@ -1481,12 +1482,13 @@ const handleStopFace = async () => {
                 </Select>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="mrn" className="text-sm">Medical Record Number</Label>
+                <Label htmlFor="mrn" className="text-sm">Medical Record Number *</Label>
                 <Input
                   id="mrn"
                   value={newPatient.medical_record_number}
                   onChange={(e) => setNewPatient({...newPatient, medical_record_number: e.target.value})}
                   placeholder="MRN-12345"
+                  required
                 />
               </div>
               <div className="space-y-2">
@@ -1504,7 +1506,7 @@ const handleStopFace = async () => {
               <Button 
                 size="sm"
                 onClick={handleCreatePatient} 
-                disabled={!newPatient.first_name || !newPatient.last_name || !newPatient.date_of_birth || createPatientMutation.isPending}
+                disabled={!newPatient.first_name || !newPatient.last_name || !newPatient.date_of_birth || !String(newPatient.medical_record_number || '').trim() || createPatientMutation.isPending}
               >
                 {createPatientMutation.isPending ? 'Creating...' : 'Create Patient'}
               </Button>

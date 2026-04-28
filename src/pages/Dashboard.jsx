@@ -25,29 +25,25 @@ export default function Dashboard() {
   const totalPatients = patients.length;
   const totalVisits = visits.length;
 
-  /** Pin canonical demo visits so Michael + Sarah stay visible even if many other visits exist. */
+  /** Show recent visits sorted by visit date. */
   const recentVisits = useMemo(() => {
     if (!visits.length) return [];
-    const pinIds = ["visit-demo-1", "visit-demo-2"];
-    const pinned = pinIds.map((id) => visits.find((v) => v.id === id)).filter(Boolean);
     const rest = [...visits]
-      .filter((v) => !pinIds.includes(v.id))
       .sort((a, b) => {
         const bt = new Date(b.visit_date).getTime();
         const at = new Date(a.visit_date).getTime();
         return (Number.isNaN(bt) || Number.isNaN(at) ? 0 : bt - at);
       });
-    const merged = [...pinned, ...rest];
     const seen = new Set();
-    return merged.filter((v) => {
+    return rest.filter((v) => {
       if (seen.has(v.id)) return false;
       seen.add(v.id);
       return true;
     }).slice(0, 5);
   }, [visits]);
 
-  const getPatientById = (patientId) => {
-    return patients.find(p => p.id === patientId);
+  const getPatientByMrn = (patientMrn) => {
+    return patients.find((p) => p.medical_record_number === patientMrn);
   };
 
   const calculateAge = (dob) => {
@@ -166,7 +162,7 @@ export default function Dashboard() {
             ) : (
               <div className="space-y-3">
                 {recentVisits.map((visit) => {
-                  const patient = getPatientById(visit.patient_id);
+                  const patient = getPatientByMrn(visit.patient_mrn);
                   return (
                     <Link 
                       key={visit.id}

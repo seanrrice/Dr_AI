@@ -19,10 +19,6 @@ import { createPageUrl, cn } from "@/utils";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import PatientNlpTrendCharts from "@/components/PatientNlpTrendCharts";
-import {
-  demoSerialVisitSnapshots,
-  SERIAL_TREND_DEMO_PATIENT_ID,
-} from "@/data/reportSerialTrendDemoData";
 
 ChartJS.register(CategoryScale, LinearScale, LineElement, PointElement, Legend, Tooltip, Filler);
 
@@ -43,29 +39,26 @@ export default function ReportSerialTrends() {
   const [searchParams] = useSearchParams();
   const reportSource = searchParams.get("source") || "";
   const isPreviousReportVisual = reportSource === "previous-report-visual";
-  const patientId =
-    searchParams.get("patientId") || (isPreviousReportVisual ? SERIAL_TREND_DEMO_PATIENT_ID : "");
+  const patientMrn = searchParams.get("patientId") || "";
   const visitId = searchParams.get("visitId") || "";
 
   const { data: trendPatient } = useQuery({
-    queryKey: ["patient", patientId],
+    queryKey: ["patient", patientMrn],
     queryFn: async () => {
-      const rows = await api.entities.Patient.filter({ id: patientId });
+      const rows = await api.entities.Patient.filter({ medical_record_number: patientMrn });
       return rows[0];
     },
-    enabled: !!patientId,
+    enabled: !!patientMrn,
   });
 
   const { data: storedVisitsForNlp = [] } = useQuery({
-    queryKey: ["visits", "nlp-trends", patientId],
-    queryFn: () => api.entities.Visit.filter({ patient_id: patientId }, "visit_date"),
-    enabled: !!patientId && !isPreviousReportVisual,
+    queryKey: ["visits", "nlp-trends", patientMrn],
+    queryFn: () => api.entities.Visit.filter({ patient_mrn: patientMrn }, "visit_date"),
+    enabled: !!patientMrn && !isPreviousReportVisual,
   });
 
   const snaps = useMemo(() => {
-    if (isPreviousReportVisual) {
-      return demoSerialVisitSnapshots;
-    }
+    if (isPreviousReportVisual) return [];
     const toNumOrNull = (value) => {
       if (value == null) return null;
       if (typeof value === "string" && value.trim() === "") return null;
@@ -222,18 +215,15 @@ export default function ReportSerialTrends() {
   }, [storedVisitsForNlp, isPreviousReportVisual]);
 
   const patientLabel = useMemo(() => {
-    if (isPreviousReportVisual && patientId === SERIAL_TREND_DEMO_PATIENT_ID) {
-      return "Michael Reyes";
-    }
     return trendPatient ? `${trendPatient.first_name} ${trendPatient.last_name}`.trim() : null;
-  }, [isPreviousReportVisual, patientId, trendPatient]);
+  }, [isPreviousReportVisual, patientMrn, trendPatient]);
 
   const patientMrnLabel = useMemo(() => {
     const mrn = trendPatient?.medical_record_number;
     if (typeof mrn === "string" && mrn.trim()) return mrn.trim();
     if (mrn != null && String(mrn).trim()) return String(mrn).trim();
-    return patientId;
-  }, [trendPatient, patientId]);
+    return patientMrn;
+  }, [trendPatient, patientMrn]);
 
   const labels = useMemo(
     () => snaps.map((s) => format(new Date(s.visit_date), "MMM d, yy")),
@@ -586,7 +576,7 @@ export default function ReportSerialTrends() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-teal-50 via-green-50 to-emerald-50 p-8">
       <div className="max-w-7xl mx-auto">
-        {!patientId ? (
+        {!patientMrn ? (
           <Card className="border-teal-200 bg-white/80 backdrop-blur">
             <CardContent className="py-8 text-sm text-teal-700">
               No patient selected for serial trend analysis.
@@ -594,7 +584,7 @@ export default function ReportSerialTrends() {
           </Card>
         ) : null}
 
-        {patientId && snaps.length === 0 ? (
+        {patientMrn && snaps.length === 0 ? (
           <Card className="border-teal-200 bg-white/80 backdrop-blur mb-6">
             <CardContent className="py-8 text-sm text-teal-700">
               No visits found for this patient yet.
@@ -602,7 +592,7 @@ export default function ReportSerialTrends() {
           </Card>
         ) : null}
 
-        {patientId && snaps.length > 0 && (
+        {patientMrn && snaps.length > 0 && (
           <>
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6">
           <div className="flex items-center gap-4">
