@@ -1,6 +1,102 @@
 import { io } from 'socket.io-client';
 
 const TRANSCRIPTION_API_URL = import.meta.env.VITE_TRANSCRIPTION_API_URL || 'http://localhost:5000';
+const PREFERRED_AUDIO_DEVICE_HINTS = (
+  import.meta.env.VITE_PREFERRED_AUDIO_DEVICE_HINTS ||
+  'audiobox,presonus,usb 96'
+)
+  .split(',')
+  .map((value) => value.trim().toLowerCase())
+  .filter(Boolean);
+const PREFERRED_AUDIO_DEVICE_EXACT_NAME = String(
+  import.meta.env.VITE_PREFERRED_AUDIO_DEVICE_EXACT_NAME || 'line (2- audiobox usb 96)'
+)
+  .trim()
+  .toLowerCase();
+const PREFERRED_AUDIO_DEVICE_STORAGE_KEY = 'dr_ai_preferred_audio_device_v1';
+
+function normalizeDeviceName(name) {
+  return String(name || '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function pickPreferredDevice(devices) {
+  if (!Array.isArray(devices) || devices.length === 0) return null;
+
+  // Strict lock: prefer exactly one configured device name.
+  if (PREFERRED_AUDIO_DEVICE_EXACT_NAME) {
+    return (
+      devices.find((d) => normalizeDeviceName(d?.name) === PREFERRED_AUDIO_DEVICE_EXACT_NAME) ||
+      null
+    );
+  }
+
+  // Fallback lock: score by hints, then pick only one best match.
+  const scored = devices
+    .map((device) => {
+      const normalizedName = normalizeDeviceName(device?.name);
+      const score = PREFERRED_AUDIO_DEVICE_HINTS.reduce(
+        (acc, hint) => (normalizedName.includes(hint) ? acc + hint.length : acc),
+        0
+      );
+      return { device, score };
+    })
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return Number(a.device?.index ?? 0) - Number(b.device?.index ?? 0);
+    });
+
+  return scored[0]?.device || null;
+}
+
+function makeDeviceFingerprint(device) {
+  return {
+    name: normalizeDeviceName(device?.name),
+    max_input_channels: Number(device?.max_input_channels ?? 0),
+    default_samplerate: Number(device?.default_samplerate ?? 0),
+    hostapi_name: normalizeDeviceName(device?.hostapi_name || ''),
+  };
+}
+
+function getStoredPreferredFingerprint() {
+  try {
+    const raw = window.localStorage.getItem(PREFERRED_AUDIO_DEVICE_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    return {
+      name: normalizeDeviceName(parsed.name),
+      max_input_channels: Number(parsed.max_input_channels ?? 0),
+      default_samplerate: Number(parsed.default_samplerate ?? 0),
+      hostapi_name: normalizeDeviceName(parsed.hostapi_name || ''),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function scoreFingerprintMatch(device, fingerprint) {
+  if (!fingerprint || !fingerprint.name) return -1;
+  const current = makeDeviceFingerprint(device);
+
+  // Name must match exactly (normalized) to avoid selecting similarly named variants.
+  if (current.name !== fingerprint.name) return -1;
+
+  let score = 100;
+  if (fingerprint.max_input_channels > 0 && current.max_input_channels === fingerprint.max_input_channels) {
+    score += 20;
+  }
+  if (fingerprint.default_samplerate > 0 && current.default_samplerate === fingerprint.default_samplerate) {
+    score += 20;
+  }
+  if (fingerprint.hostapi_name && current.hostapi_name === fingerprint.hostapi_name) {
+    score += 20;
+  }
+  return score;
+}
 
 class TranscriptionService {
   constructor() {
@@ -104,12 +200,63 @@ class TranscriptionService {
     const devices = Array.isArray(data.devices) ? data.devices : [];
     // Keep all backend-reported input devices (no name-collapsing), because
     // some interfaces expose multiple valid variants with the same label.
-    return devices
+    const normalizedDevices = devices
       .filter((d) => {
         const name = String(d?.name || '').trim();
         return !!name;
       })
       .sort((a, b) => Number(a?.index ?? 0) - Number(b?.index ?? 0));
+
+    const storedFingerprint = getStoredPreferredFingerprint();
+    let preferredDevice = null;
+    let preferredSource = 'none';
+
+    if (storedFingerprint) {
+      const ranked = normalizedDevices
+        .map((device) => ({
+          device,
+          score: scoreFingerprintMatch(device, storedFingerprint),
+        }))
+        .filter((entry) => entry.score >= 100)
+        .sort((a, b) => {
+          if (b.score !== a.score) return b.score - a.score;
+          return Number(a.device?.index ?? 0) - Number(b.device?.index ?? 0);
+        });
+      preferredDevice = ranked[0]?.device || null;
+      preferredSource = preferredDevice ? 'stored' : 'none';
+    }
+
+    if (!preferredDevice && !storedFingerprint) {
+      preferredDevice = pickPreferredDevice(normalizedDevices);
+      preferredSource = preferredDevice ? 'fallback' : 'none';
+    } else if (!preferredDevice && storedFingerprint) {
+      preferredSource = 'stored_unmatched';
+    }
+
+    const preferredIndex = preferredDevice ? Number(preferredDevice.index) : null;
+
+    return normalizedDevices.map((device) => ({
+      ...device,
+      preferred: preferredIndex != null && Number(device.index) === preferredIndex,
+      preferred_source: preferredSource,
+    }));
+  }
+
+  setPreferredInputDevice(device) {
+    const fingerprint = makeDeviceFingerprint(device);
+    if (!fingerprint.name) {
+      throw new Error('Cannot save preferred device without a valid name');
+    }
+    window.localStorage.setItem(PREFERRED_AUDIO_DEVICE_STORAGE_KEY, JSON.stringify(fingerprint));
+    return fingerprint;
+  }
+
+  clearPreferredInputDevice() {
+    window.localStorage.removeItem(PREFERRED_AUDIO_DEVICE_STORAGE_KEY);
+  }
+
+  hasStoredPreferredInputDevice() {
+    return !!getStoredPreferredFingerprint();
   }
 
   /**

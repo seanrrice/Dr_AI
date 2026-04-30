@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { api } from "@/api/apiClient";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
@@ -211,21 +211,33 @@ export default function NewVisit() {
 
   useEffect(() => {
     let mounted = true;
-    transcriptionService.getInputDevices()
-      .then((devices) => {
+    (async () => {
+      try {
+        const devices = await transcriptionService.getInputDevices();
         if (!mounted) return;
         setAudioDevices(devices);
         setAudioDevicesError(null);
-      })
-      .catch((error) => {
+      } catch (error) {
         if (!mounted) return;
         console.error('Failed to load audio devices:', error);
         setAudioDevicesError(error.message || 'Could not load audio devices');
-      });
+      }
+    })();
     return () => {
       mounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (selectedAudioDevice !== "default") return;
+    const preferredDevice = audioDevices.find((device) => device?.preferred);
+    if (preferredDevice) {
+      setSelectedAudioDevice(String(preferredDevice.index));
+    }
+  }, [audioDevices, selectedAudioDevice]);
+
+  const preferredSource = audioDevices[0]?.preferred_source || "none";
+  const preferredDeviceMissing = preferredSource === "stored_unmatched";
 
   // Cleanup transcription, face, gait on unmount
   useEffect(() => {
@@ -1513,7 +1525,12 @@ const handleStopFace = async () => {
                     <SelectContent className="border-teal-200">
                       <SelectItem value="default">System Default Input</SelectItem>
                       {audioDevices.map((device) => (
-                        <SelectItem key={String(device.index)} value={String(device.index)}>
+                        <SelectItem
+                          key={String(device.index)}
+                          value={String(device.index)}
+                          className={device.preferred ? "bg-green-50 text-green-800 focus:bg-green-100 focus:text-green-900" : ""}
+                        >
+                          {device.preferred ? "✅ " : ""}
                           {device.name} ({device.max_input_channels} ch max)
                         </SelectItem>
                       ))}
@@ -1540,6 +1557,11 @@ const handleStopFace = async () => {
               {audioDevicesError && (
                 <p className="text-xs text-amber-700 bg-amber-50 rounded p-2">
                   ⚠️ {audioDevicesError}
+                </p>
+              )}
+              {preferredDeviceMissing && (
+                <p className="text-xs text-amber-700 bg-amber-50 rounded p-2">
+                  ⚠️ Saved preferred audio device is not available right now.
                 </p>
               )}
               {isStartingTranscription && (

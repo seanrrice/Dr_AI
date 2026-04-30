@@ -2,24 +2,24 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit
-import queue
-import threading
-import numpy as np
-import sounddevice as sd
-import time
+import asyncio
+import json
 import os
-import wave
-import tempfile
+import shlex
+import shutil
 import subprocess
 import sys
-
-import json
-import shutil
+import threading
+import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from datetime import datetime
+from urllib.parse import quote, urlparse
 
-from collections import deque
-import difflib
+import numpy as np
+import sounddevice as sd
+import websockets
 
 #Ensure repo root is in sys.path for imports
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -32,11 +32,15 @@ import cv2
 from emotion_pipeline.webcam_emotion_mediapipe import run_face_analysis
 from flask import Response
 
-# Optional: use faster_whisper if installed
-try:
-    from faster_whisper import WhisperModel
-except ImportError:
-    WhisperModel = None
+# WhisperLiveKit: native WebSocket /asr (PCM) — VAC/VAD/chunking handled server-side
+WHISPERLIVEKIT_BASE_URL = os.environ.get("WHISPERLIVEKIT_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
+WHISPERLIVEKIT_WS_PATH = os.environ.get("WHISPERLIVEKIT_WS_PATH", "/asr")
+WHISPERLIVEKIT_AUTOSTART = os.environ.get("WHISPERLIVEKIT_AUTOSTART", "1").strip().lower() not in ("0", "false", "no")
+WHISPERLIVEKIT_MODEL = os.environ.get("WHISPERLIVEKIT_MODEL", "small.en")
+WHISPERLIVEKIT_LANGUAGE = os.environ.get("WHISPERLIVEKIT_LANGUAGE", "auto")
+WHISPERLIVEKIT_HEALTH_TIMEOUT_S = float(os.environ.get("WHISPERLIVEKIT_HEALTH_TIMEOUT_S", "60"))
+# Extra CLI args for whisperlivekit-server (e.g. --vac-chunk-size 0.04 --min-chunk-size 0.1 --backend faster-whisper)
+WHISPERLIVEKIT_SERVER_EXTRA_ARGS = os.environ.get("WHISPERLIVEKIT_SERVER_EXTRA_ARGS", "")
 
 # ================= CONFIG =================
 # Try device 24 first (may give true stereo on some drivers); fallback to 15
@@ -46,18 +50,9 @@ SAMPLE_RATE_CAPTURE = 48000
 SAMPLE_RATE_WHISPER = 16000
 CHANNELS = 2
 CHUNK = 1536
-RMS_THRESHOLD = 0.01
-MIN_SPEECH = 0.5       # seconds
-SILENCE_DURATION = 0.8 # seconds
 # Callback-based capture (required for device 24 on Windows when blocking fails)
 USE_CALLBACK_CAPTURE = True
-# Max segments to queue for transcription; excess dropped to avoid long backlog
-MAX_SEGMENT_QUEUE = 2
 RMS_DISPLAY_INTERVAL = 0.1  # seconds between RMS console updates
-
-# Optional colors for console
-NEON_GREEN = "\033[92m"
-RESET_COLOR = "\033[0m"
 
 # ==========================================
 
@@ -73,25 +68,6 @@ latest_face_frames = {}
 face_frames_lock = Lock()
 
 # ====== Audio Helpers ======
-def save_wav_file(audio_data, samplerate, channels):
-    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".wav")
-    name = temp_file.name
-    temp_file.close()
-    audio_int16 = (audio_data * 32767).astype(np.int16)
-    with wave.open(name, 'wb') as wf:
-        wf.setnchannels(channels)
-        wf.setsampwidth(2)
-        wf.setframerate(samplerate)
-        wf.writeframes(audio_int16.tobytes())
-    return name
-
-def normalize_audio(audio):
-    audio = audio.astype(np.float32)
-    max_val = np.max(np.abs(audio))
-    if max_val > 0:
-        audio /= max_val
-    return audio
-
 def resample_audio(audio, from_sr, to_sr):
     """Resample 1D float32 audio from from_sr to to_sr. Returns mono float32."""
     if from_sr == to_sr:
@@ -111,6 +87,93 @@ def format_timestamp(seconds):
     mm, ss = divmod(td, 60)
     return f"{mm:02}:{ss:02}"
 
+
+def _parse_http_host_port(base_url: str):
+    u = urlparse(base_url)
+    host = u.hostname or "127.0.0.1"
+    if u.port is not None:
+        port = u.port
+    elif u.scheme == "https":
+        port = 443
+    else:
+        port = 8000
+    return host, port
+
+
+def _http_to_ws_base(base_url: str) -> str:
+    u = urlparse(base_url)
+    scheme = "wss" if u.scheme == "https" else "ws"
+    host = u.hostname or "127.0.0.1"
+    port = u.port
+    if port is None:
+        port = 443 if u.scheme == "https" else 8000
+    return f"{scheme}://{host}:{port}"
+
+
+def _build_asr_websocket_url() -> str:
+    base = _http_to_ws_base(WHISPERLIVEKIT_BASE_URL)
+    path = WHISPERLIVEKIT_WS_PATH if WHISPERLIVEKIT_WS_PATH.startswith("/") else f"/{WHISPERLIVEKIT_WS_PATH}"
+    lang = (WHISPERLIVEKIT_LANGUAGE or "").strip().lower()
+    if lang and lang not in ("auto", "none"):
+        return f"{base}{path}?language={quote(WHISPERLIVEKIT_LANGUAGE)}"
+    return f"{base}{path}"
+
+
+def _health_ping_ok(url: str) -> bool:
+    try:
+        req = urllib.request.Request(url, method="GET")
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            return 200 <= resp.status < 300
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return False
+
+
+class WhisperLiveKitProcess:
+    """Starts whisperlivekit-server (PCM mode) so /asr owns VAC/VAD/chunking."""
+
+    _lock = Lock()
+    _proc = None
+
+    @classmethod
+    def _is_running(cls):
+        return cls._proc is not None and cls._proc.poll() is None
+
+    @classmethod
+    def ensure_started(cls):
+        if not WHISPERLIVEKIT_AUTOSTART:
+            return
+        host, port = _parse_http_host_port(WHISPERLIVEKIT_BASE_URL)
+        argv_core = [
+            "--host",
+            host,
+            "--port",
+            str(port),
+            "--pcm-input",
+            "--model",
+            WHISPERLIVEKIT_MODEL,
+            "--lan",
+            WHISPERLIVEKIT_LANGUAGE or "auto",
+        ]
+        extra = shlex.split(WHISPERLIVEKIT_SERVER_EXTRA_ARGS.strip() or "", posix=os.name != "nt")
+        with cls._lock:
+            if cls._is_running():
+                return
+            server_exe = shutil.which("whisperlivekit-server")
+            if server_exe:
+                cmd = [server_exe] + argv_core + extra
+            else:
+                cmd = [sys.executable, "-m", "whisperlivekit.basic_server"] + argv_core + extra
+            try:
+                cls._proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                print(f"[WhisperLiveKit] Started server ({' '.join(cmd[:3])} …) on {host}:{port} (--pcm-input)")
+            except Exception as e:
+                cls._proc = None
+                print(f"[WhisperLiveKit] Failed to autostart server: {e}")
+
 # ====== Transcription Session Class ======
 class TranscriptionSession:
     def __init__(self, device_index=None, channels=2):
@@ -121,303 +184,189 @@ class TranscriptionSession:
         self.device_index = device_index
         self.channels_requested = channels if channels in (1, 2) else 2
         self.active_channels = self.channels_requested
-        self._audio_queue = queue.Queue()
-        self._segment_queue = queue.Queue(maxsize=MAX_SEGMENT_QUEUE)
         self._transcript_lock = threading.Lock()
         self._rms_lock = threading.Lock()
         self._rms_ch1 = 0.0
         self._rms_ch2 = 0.0
         self._last_stream_status_log_at = 0.0
         self._last_rms_update_at = 0.0
-
-        # Rolling buffer for streaming transcription
-        self._buffer_lock = threading.Lock()
-        self._audio_buf_ch1 = deque()
-        self._audio_buf_ch2 = deque()
-        self._buf_max_seconds = float(os.environ.get("STREAM_BUF_SECONDS", "20"))  # ring buffer size
-        self._window_seconds = float(os.environ.get("STREAM_WINDOW_SECONDS", "6"))  # transcribe window
-        self._update_interval_s = float(os.environ.get("STREAM_UPDATE_INTERVAL_S", "0.5"))
-        self._tail_keep_tokens = int(os.environ.get("STREAM_TAIL_KEEP_TOKENS", "2"))
-        self._stability_k = int(os.environ.get("STREAM_STABILITY_K", "2"))
-        self._use_vad_filter = os.environ.get("STREAM_USE_VAD_FILTER", "1").strip() not in ("0", "false", "False")
-        self._stream_mode = os.environ.get("STREAM_MODE", "1").strip() not in ("0", "false", "False")
-
-        self._stream_start_wall = None
         self._stream_stop_event = threading.Event()
-
-        # Accumulated transcript lines (stable)
-        self._lines = []
+        self._session_id = "default"
+        self._bridge_thread = None
+        self._wlk_loop = None
+        self._pcm_q_ch1 = None
+        self._pcm_q_ch2 = None
+        self._bridge_ready = threading.Event()
+        self._routing_ready = threading.Event()
+        self._wlk_blocks = {"Mic 1": "", "Mic 2": ""}
+        self._wlk_display_lock = threading.Lock()
         self._last_full_text = ""
         self._last_interim_lines = []
-        self._ch_state = {
-            "Mic 1": {
-                "committed_end_s": 0.0,
-                "history": deque(maxlen=max(1, self._stability_k)),
-                "last_pending_words": [],
-                "empty_updates": 0,
-            },
-            "Mic 2": {
-                "committed_end_s": 0.0,
-                "history": deque(maxlen=max(1, self._stability_k)),
-                "last_pending_words": [],
-                "empty_updates": 0,
-            },
-        }
 
-        # Load Whisper model if available.
-        self.model = None
-        if WhisperModel:
-            model_size = os.environ.get("WHISPER_MODEL_SIZE", "small.en")
-            requested_device = os.environ.get("WHISPER_DEVICE", "cpu").strip().lower()
-            if requested_device not in ("cpu", "cuda"):
-                requested_device = "cuda"
+    def _float_chunk_to_pcm_bytes(self, float_ch: np.ndarray) -> bytes:
+        y = resample_audio(float_ch.astype(np.float32), SAMPLE_RATE_CAPTURE, SAMPLE_RATE_WHISPER)
+        y = np.clip(y, -1.0, 1.0)
+        return (y * 32767.0).astype(np.int16).tobytes()
 
+    def _enqueue_pcm_chunk(self, pcm_bytes: bytes, q):
+        if self._wlk_loop is None or q is None or not pcm_bytes:
+            return
+
+        def _try_put():
             try:
-                if requested_device == "cuda":
-                    # GPU-first path with automatic CPU fallback if CUDA/cuDNN is unavailable.
-                    self.model = WhisperModel(model_size, device="cuda", compute_type="int8")
-                    print(f"[Session] Whisper loaded on CUDA ({model_size})")
-                else:
-                    self.model = WhisperModel(model_size, device="cpu", compute_type="int8")
-                    print(f"[Session] Whisper loaded on CPU ({model_size})")
-            except Exception as e:
-                if requested_device == "cuda":
-                    print(f"[Session] CUDA Whisper init failed: {e}. Falling back to CPU.")
-                    try:
-                        self.model = WhisperModel(model_size, device="cpu", compute_type="int8")
-                        print(f"[Session] Whisper loaded on CPU fallback ({model_size})")
-                    except Exception as cpu_e:
-                        print(f"[Session] Failed to load Whisper model on CPU fallback: {cpu_e}")
-                        self.model = None
-                else:
-                    print(f"[Session] Failed to load Whisper model: {e}")
-                    self.model = None
+                q.put_nowait(pcm_bytes)
+            except asyncio.QueueFull:
+                try:
+                    q.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                try:
+                    q.put_nowait(pcm_bytes)
+                except asyncio.QueueFull:
+                    pass
 
-    def _seconds_since_start(self):
-        if self._stream_start_wall is None:
-            return 0.0
-        return max(0.0, time.time() - self._stream_start_wall)
+        self._wlk_loop.call_soon_threadsafe(_try_put)
 
-    def _append_to_ring(self, ch1, ch2=None):
-        max_len = int(self._buf_max_seconds * SAMPLE_RATE_CAPTURE)
-        with self._buffer_lock:
-            self._audio_buf_ch1.extend(ch1.tolist())
-            while len(self._audio_buf_ch1) > max_len:
-                self._audio_buf_ch1.popleft()
-            if ch2 is not None:
-                self._audio_buf_ch2.extend(ch2.tolist())
-                while len(self._audio_buf_ch2) > max_len:
-                    self._audio_buf_ch2.popleft()
+    def _format_wlk_block(self, msg: dict, mic_label: str) -> str:
+        parts = []
+        for line in (msg.get("lines") or []):
+            t = (line.get("text") or "").strip()
+            if not t or line.get("speaker") == -2:
+                continue
+            st = line.get("start") or ""
+            en = line.get("end") or ""
+            parts.append(f"[{st} -> {en}] {mic_label}: {t}")
+        buf = (msg.get("buffer_transcription") or "").strip()
+        if buf:
+            parts.append(f"[interim] {mic_label}: {buf}")
+        return "\n".join(parts)
 
-    def _read_window(self, which="Mic 1"):
-        need = int(self._window_seconds * SAMPLE_RATE_CAPTURE)
-        with self._buffer_lock:
-            buf = self._audio_buf_ch1 if which == "Mic 1" else self._audio_buf_ch2
-            if len(buf) < max(need // 4, 1):
-                return None, None
-            # take last need samples (or all if smaller)
-            tail = list(buf)[-need:]
-            actual_len = len(tail)
-        audio = np.asarray(tail, dtype=np.float32)
-        window_duration_s = actual_len / float(SAMPLE_RATE_CAPTURE)
-        window_start_s = max(0.0, self._seconds_since_start() - window_duration_s)
-        return audio, window_start_s
-
-    def _transcribe_words(self, audio_1d):
-        """Return list of dicts: {word, start, end} with word timestamps in seconds."""
-        if audio_1d is None:
-            return []
-        # quick silence skip (pre-VAD) to avoid wasted calls
-        if float(np.sqrt(np.mean(audio_1d**2))) < RMS_THRESHOLD:
-            return []
-        audio_1d = normalize_audio(audio_1d.astype(np.float32))
-        audio_1d = resample_audio(audio_1d, SAMPLE_RATE_CAPTURE, SAMPLE_RATE_WHISPER)
-        wav_path = save_wav_file(audio_1d, SAMPLE_RATE_WHISPER, 1)
-        try:
-            if not self.model:
-                return []
-            segments, _info = self.model.transcribe(
-                wav_path,
-                vad_filter=self._use_vad_filter,
-                word_timestamps=True,
-            )
-            out = []
-            for seg in segments:
-                for w in getattr(seg, "words", []) or []:
-                    ww = (w.word or "").strip()
-                    if not ww:
-                        continue
-                    out.append({"word": ww, "start": float(w.start), "end": float(w.end)})
-            return out
-        except Exception as e:
-            print(f"[Stream] Transcription error: {e}")
-            return []
-        finally:
+    def _emit_wlk_update(self, session_id: str, mic_label: str, msg: dict):
+        with self._wlk_display_lock:
+            block = self._format_wlk_block(msg, mic_label)
+            self._wlk_blocks[mic_label] = block
+            chunks = []
+            if self.active_channels == 2:
+                for key in ("Mic 1", "Mic 2"):
+                    b = (self._wlk_blocks.get(key) or "").strip()
+                    if b:
+                        chunks.append(b)
+            else:
+                b = (self._wlk_blocks.get("Mic 1") or "").strip()
+                if b:
+                    chunks.append(b)
+            full_text = "\n\n".join(chunks)
+            self._last_full_text = full_text
+        buf = (msg.get("buffer_transcription") or "").strip()
+        interim = [f"[interim] {mic_label}: {buf}"] if buf else []
+        self._last_interim_lines = interim
+        delta = buf
+        if not delta:
+            lines = msg.get("lines") or []
+            if lines:
+                delta = (lines[-1].get("text") or "").strip()
+        if self.callback:
             try:
-                os.remove(wav_path)
+                self.callback(delta or "")
             except Exception:
                 pass
+        socketio.emit(
+            "transcription_update",
+            {
+                "session_id": session_id,
+                "text": delta or "",
+                "full_text": full_text,
+                "interim": interim,
+            },
+        )
 
-    def _stable_prefix_len(self, histories):
-        """Compute stable prefix length across last K hypotheses (word strings)."""
-        if not histories:
-            return 0
-        lists = [h for h in histories if isinstance(h, list)]
-        if len(lists) == 0:
-            return 0
-        if len(lists) == 1:
-            return len(lists[0])
-        min_len = min(len(x) for x in lists)
-        n = 0
-        for i in range(min_len):
-            w0 = lists[0][i].get("word")
-            if all(x[i].get("word") == w0 for x in lists[1:]):
-                n += 1
-            else:
-                break
-        return n
+    async def _await_wlk_health(self):
+        url = f"{WHISPERLIVEKIT_BASE_URL}/health"
+        deadline = time.time() + WHISPERLIVEKIT_HEALTH_TIMEOUT_S
+        while time.time() < deadline:
+            if _health_ping_ok(url):
+                return
+            await asyncio.sleep(0.25)
+        raise RuntimeError(
+            f"WhisperLiveKit server not reachable at {url} "
+            "(start it manually or fix WHISPERLIVEKIT_BASE_URL; set WHISPERLIVEKIT_AUTOSTART=0 if it runs separately)"
+        )
 
-    def _filter_new_words(self, words, committed_end_s):
-        if not words:
-            return []
-        eps = 1e-3
-        return [w for w in words if float(w.get("end", 0.0)) > committed_end_s + eps]
+    async def _run_one_mic_ws(self, session_id: str, mic_label: str, pcm_queue: asyncio.Queue):
+        uri = _build_asr_websocket_url()
+        try:
+            async with websockets.connect(uri, max_size=None) as ws:
+                raw = await ws.recv()
+                if isinstance(raw, str):
+                    try:
+                        json.loads(raw)
+                    except json.JSONDecodeError:
+                        pass
 
-    def _commit_words_as_line(self, mic, words):
-        if not words:
-            return None
-        state = self._ch_state[mic]
-        s = words[0]["start"]
-        e = words[-1]["end"]
-        text = " ".join(w["word"] for w in words).strip()
-        if not text:
-            return None
-        line = f"[{self._format_stamp(s)} -> {self._format_stamp(e)}] {mic}: {text}"
-        with self._transcript_lock:
-            self.transcripts.append(line)
-        self._lines.append(line)
-        state["committed_end_s"] = max(float(state["committed_end_s"]), float(e))
-        rebased = deque(maxlen=max(1, self._stability_k))
-        for hist in list(state["history"]):
-            rebased.append(self._filter_new_words(hist, state["committed_end_s"]))
-        state["history"] = rebased
-        state["last_pending_words"] = []
-        state["empty_updates"] = 0
-        return line
+                async def sender():
+                    try:
+                        while self.is_running:
+                            try:
+                                chunk = await asyncio.wait_for(pcm_queue.get(), timeout=0.05)
+                            except asyncio.TimeoutError:
+                                continue
+                            await ws.send(chunk)
+                    finally:
+                        try:
+                            await ws.send(b"")
+                        except Exception:
+                            pass
 
-    def _format_stamp(self, seconds):
-        return format_timestamp(seconds)
+                async def receiver():
+                    while self.is_running:
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                        except asyncio.TimeoutError:
+                            continue
+                        except websockets.exceptions.ConnectionClosed:
+                            break
+                        if isinstance(raw, bytes):
+                            continue
+                        try:
+                            msg = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        mtype = msg.get("type")
+                        if mtype == "ready_to_stop":
+                            break
+                        if mtype == "config":
+                            continue
+                        self._emit_wlk_update(session_id, mic_label, msg)
 
-    def _emit_update(self, session_id, newly_finalized_line=None):
-        full_text = "\n".join(self._lines)
-        if full_text.strip():
-            self._last_full_text = full_text
-        socketio.emit("transcription_update", {
-            "session_id": session_id,
-            "text": newly_finalized_line or "",
-            "full_text": full_text,
-        })
+                await asyncio.gather(sender(), receiver())
+        except Exception as e:
+            print(f"[WhisperLiveKit] WebSocket error ({mic_label}): {e}")
 
-    def _stream_loop(self, session_id):
-        """Periodic re-transcription on rolling window with stability buffer."""
-        while self.is_running and not self._stream_stop_event.is_set():
-            try:
-                mic_labels = ["Mic 1"] if self.active_channels == 1 else ["Mic 1", "Mic 2"]
-                interim_lines = []
-                newly_finalized_any = None
-                for mic in mic_labels:
-                    audio, window_start_s = self._read_window(mic)
-                    if audio is None:
-                        continue
-                    words = self._transcribe_words(audio)
-                    # Convert from window-relative timestamps to session-absolute timestamps.
-                    abs_words = [
-                        {
-                            "word": w["word"],
-                            "start": float(w["start"]) + float(window_start_s or 0.0),
-                            "end": float(w["end"]) + float(window_start_s or 0.0),
-                        }
-                        for w in words
-                    ]
-                    state = self._ch_state[mic]
-                    pending_words = self._filter_new_words(abs_words, state["committed_end_s"])
-                    state["history"].append(pending_words)
-                    state["last_pending_words"] = pending_words
-                    stable_len = self._stable_prefix_len(list(state["history"]))
-                    new_final_len = max(0, stable_len - self._tail_keep_tokens)
-                    if new_final_len > 0:
-                        new_words = pending_words[:new_final_len]
-                        line = self._commit_words_as_line(mic, new_words)
-                        if line:
-                            newly_finalized_any = line
-
-                    # Always compute an interim tail so the UI updates immediately.
-                    latest_pending = list(state["history"])[-1] if len(state["history"]) > 0 else []
-                    tail_words = latest_pending if latest_pending else []
-                    if tail_words:
-                        state["empty_updates"] = 0
-                        s = tail_words[0]["start"]
-                        e = tail_words[-1]["end"]
-                        text = " ".join(w["word"] for w in tail_words).strip()
-                        interim_lines.append(f"[{self._format_stamp(s)} -> {self._format_stamp(e)}] {mic}: {text}")
-                    else:
-                        state["empty_updates"] += 1
-                        # If speech just ended, preserve the previous pending segment instead of losing it.
-                        if state["empty_updates"] >= 2 and state["last_pending_words"]:
-                            line = self._commit_words_as_line(mic, state["last_pending_words"])
-                            if line:
-                                newly_finalized_any = line
-
-                # Emit: stable lines + current interim tails (non-persisted)
-                full_text = "\n".join(self._lines + interim_lines)
-                # Do not allow empty updates to wipe the UI.
-                if not full_text.strip() and not newly_finalized_any:
-                    continue
-
-                if full_text.strip():
-                    self._last_full_text = full_text
-                self._last_interim_lines = interim_lines
-
-                socketio.emit("transcription_update", {
-                    "session_id": session_id,
-                    "text": newly_finalized_any or "",
-                    "full_text": full_text,
-                    "interim": interim_lines,
-                })
-            except Exception as e:
-                print(f"[Stream] Loop error: {e}")
-            time.sleep(max(0.2, self._update_interval_s))
-
-    def _process_segment(self, audio_chunk, speech_start_time, speech_end_time, session_start, queue_wait=0.0):
-        if np.mean(np.abs(audio_chunk)) < 1e-4:
-            return
-        if audio_chunk.ndim == 1 or audio_chunk.shape[1] == 1:
-            if np.sqrt(np.mean(audio_chunk**2)) > RMS_THRESHOLD:
-                text = self.transcribe_audio(audio_chunk, "",
-                                             speech_start_time, speech_end_time, queue_wait=queue_wait)
-                if text:
-                    with self._transcript_lock:
-                        self.transcripts.append(text)
-                    if self.callback:
-                        self.callback(text)
+    async def _wlk_session_main(self, session_id: str):
+        WhisperLiveKitProcess.ensure_started()
+        await self._await_wlk_health()
+        if self.active_channels == 2:
+            await asyncio.gather(
+                self._run_one_mic_ws(session_id, "Mic 1", self._pcm_q_ch1),
+                self._run_one_mic_ws(session_id, "Mic 2", self._pcm_q_ch2),
+            )
         else:
-            ch1, ch2 = audio_chunk[:, 0], audio_chunk[:, 1]
-            if np.sqrt(np.mean(ch1**2)) > RMS_THRESHOLD:
-                text_mic1 = self.transcribe_audio(ch1, "Mic 1",
-                                                  speech_start_time, speech_end_time, queue_wait=queue_wait)
-                if text_mic1:
-                    with self._transcript_lock:
-                        self.transcripts.append(text_mic1)
-                    if self.callback:
-                        self.callback(text_mic1)
-            if np.sqrt(np.mean(ch2**2)) > RMS_THRESHOLD:
-                text_mic2 = self.transcribe_audio(ch2, "Mic 2",
-                                                   speech_start_time, speech_end_time, queue_wait=queue_wait)
-                if text_mic2:
-                    with self._transcript_lock:
-                        self.transcripts.append(text_mic2)
-                    if self.callback:
-                        self.callback(text_mic2)
+            await self._run_one_mic_ws(session_id, "Mic 1", self._pcm_q_ch1)
+
+    def _bridge_main(self, session_id: str):
+        loop = asyncio.new_event_loop()
+        self._wlk_loop = loop
+        asyncio.set_event_loop(loop)
+        self._pcm_q_ch1 = asyncio.Queue(maxsize=500)
+        self._pcm_q_ch2 = asyncio.Queue(maxsize=500) if self.active_channels == 2 else None
+        self._bridge_ready.set()
+        try:
+            loop.run_until_complete(self._wlk_session_main(session_id))
+        except Exception as e:
+            print(f"[WhisperLiveKit] Bridge stopped: {e}")
+        finally:
+            loop.close()
+            self._wlk_loop = None
 
     def _capture_callback(self, indata, frames, time_info, status):
         if status:
@@ -425,30 +374,33 @@ class TranscriptionSession:
             if now - self._last_stream_status_log_at >= 2.0:
                 print(f"[Session] Stream status: {status}")
                 self._last_stream_status_log_at = now
-        if self.is_running and indata is not None and len(indata) > 0:
-            # Only feed the old queue in legacy segmentation mode.
-            if not self._stream_mode:
-                self._audio_queue.put(indata.copy())
-
-            now = time.time()
-            if now - self._last_rms_update_at >= RMS_DISPLAY_INTERVAL:
-                if indata.ndim == 1 or indata.shape[1] == 1:
-                    r1 = float(np.sqrt(np.mean(indata**2)))
-                    r2 = 0.0
-                else:
-                    r1 = float(np.sqrt(np.mean(indata[:, 0]**2)))
-                    r2 = float(np.sqrt(np.mean(indata[:, 1]**2)))
-                with self._rms_lock:
-                    self._rms_ch1, self._rms_ch2 = r1, r2
-                self._last_rms_update_at = now
-            # Feed ring buffer for streaming transcription
-            try:
-                if indata.ndim == 1 or indata.shape[1] == 1:
-                    self._append_to_ring(indata.reshape(-1))
-                else:
-                    self._append_to_ring(indata[:, 0], indata[:, 1])
-            except Exception:
-                pass
+        if not (self.is_running and indata is not None and len(indata) > 0):
+            return
+        now = time.time()
+        if now - self._last_rms_update_at >= RMS_DISPLAY_INTERVAL:
+            if indata.ndim == 1 or indata.shape[1] == 1:
+                r1 = float(np.sqrt(np.mean(indata**2)))
+                r2 = 0.0
+            else:
+                r1 = float(np.sqrt(np.mean(indata[:, 0] ** 2)))
+                r2 = float(np.sqrt(np.mean(indata[:, 1] ** 2)))
+            with self._rms_lock:
+                self._rms_ch1, self._rms_ch2 = r1, r2
+            self._last_rms_update_at = now
+        if not self._routing_ready.is_set():
+            return
+        try:
+            if indata.ndim == 1 or indata.shape[1] == 1:
+                pcm = self._float_chunk_to_pcm_bytes(indata.reshape(-1))
+                self._enqueue_pcm_chunk(pcm, self._pcm_q_ch1)
+            else:
+                pcm1 = self._float_chunk_to_pcm_bytes(indata[:, 0])
+                self._enqueue_pcm_chunk(pcm1, self._pcm_q_ch1)
+                if self._pcm_q_ch2 is not None:
+                    pcm2 = self._float_chunk_to_pcm_bytes(indata[:, 1])
+                    self._enqueue_pcm_chunk(pcm2, self._pcm_q_ch2)
+        except Exception:
+            pass
 
     def _rms_display_loop(self):
         while self.is_running:
@@ -457,209 +409,80 @@ class TranscriptionSession:
             print(f"\rRMS -> Mic 1: {r1:.3f}, Mic 2: {r2:.3f}", end="", flush=True)
             time.sleep(RMS_DISPLAY_INTERVAL)
 
-    def _run_transcription_worker(self, session_start):
-        while self.is_running:
-            try:
-                item = self._segment_queue.get(timeout=0.5)
-            except queue.Empty:
-                continue
-            (audio_chunk, speech_start_time, speech_end_time, _sess_start, t_ready) = item
-            queue_wait = time.time() - t_ready
-            self._process_segment(audio_chunk, speech_start_time, speech_end_time, session_start, queue_wait=queue_wait)
-        while True:
-            try:
-                item = self._segment_queue.get_nowait()
-            except queue.Empty:
-                break
-            (audio_chunk, speech_start_time, speech_end_time, _sess_start, t_ready) = item
-            queue_wait = time.time() - t_ready
-            self._process_segment(audio_chunk, speech_start_time, speech_end_time, session_start, queue_wait=queue_wait)
-
-    def _run_worker(self, session_start):
-        chunks_per_second = SAMPLE_RATE_CAPTURE / CHUNK
-        min_chunks = int(MIN_SPEECH * chunks_per_second)
-        silence_limit = int(SILENCE_DURATION * chunks_per_second)
-        frames = []
-        silent_chunks = 0
-        speaking_chunks = 0
-        speech_start_time = None
-        while self.is_running:
-            try:
-                data = self._audio_queue.get(timeout=0.5)
-            except queue.Empty:
-                continue
-            if data.ndim == 1 or data.shape[1] == 1:
-                ch1_rms = np.sqrt(np.mean(data**2))
-                ch2_rms = 0.0
-            else:
-                ch1_rms = np.sqrt(np.mean(data[:, 0]**2))
-                ch2_rms = np.sqrt(np.mean(data[:, 1]**2))
-            silent = max(ch1_rms, ch2_rms) < RMS_THRESHOLD
-            if not silent and speech_start_time is None:
-                speech_start_time = time.time() - session_start
-            frames.append(data)
-            if silent:
-                silent_chunks += 1
-            else:
-                silent_chunks = 0
-                speaking_chunks += 1
-            if speaking_chunks > min_chunks and silent_chunks > silence_limit:
-                audio_chunk = np.concatenate(frames, axis=0)
-                speech_end_time = time.time() - session_start
-                t_ready = time.time()
-                try:
-                    self._segment_queue.put_nowait((audio_chunk, speech_start_time, speech_end_time, session_start, t_ready))
-                except queue.Full:
-                    try:
-                        self._segment_queue.get_nowait()
-                    except queue.Empty:
-                        pass
-                    try:
-                        self._segment_queue.put_nowait((audio_chunk, speech_start_time, speech_end_time, session_start, t_ready))
-                    except queue.Full:
-                        pass
-                frames = []
-                silent_chunks = 0
-                speaking_chunks = 0
-                speech_start_time = None
-
     def start(self, session_id="default"):
+        self._session_id = session_id
         self.is_running = True
-        session_start = time.time()
-        self._stream_start_wall = session_start
         self._stream_stop_event.clear()
+        self._bridge_ready.clear()
+        self._routing_ready.clear()
+        self._wlk_blocks = {"Mic 1": "", "Mic 2": ""}
+        self._last_full_text = ""
+        self._last_interim_lines = []
         requested_channels = self.channels_requested
         selected_device = self.device_index
         device = selected_device if selected_device is not None else DEVICE_INDEX
         use_callback = USE_CALLBACK_CAPTURE
 
-        # Try callback-based stream (required for device 24 on some Windows drivers)
-        if use_callback:
-            devices_to_try = [device]
-            if selected_device is None and DEVICE_INDEX_FALLBACK not in devices_to_try:
-                devices_to_try.append(DEVICE_INDEX_FALLBACK)
+        if not use_callback:
+            print("[Session] USE_CALLBACK_CAPTURE must be True for WhisperLiveKit streaming.")
+            self.is_running = False
+            return
 
-            for try_device in devices_to_try:
-                try:
-                    try:
-                        self.stream = sd.InputStream(
-                            device=try_device,
-                            samplerate=SAMPLE_RATE_CAPTURE,
-                            channels=requested_channels,
-                            dtype='float32',
-                            blocksize=CHUNK,
-                            callback=self._capture_callback,
-                        )
-                        self.stream.start()
-                        self.active_channels = requested_channels
-                    except sd.PortAudioError:
-                        if requested_channels == 2:
-                            self.stream = sd.InputStream(
-                                device=try_device,
-                                samplerate=SAMPLE_RATE_CAPTURE,
-                                channels=1,
-                                dtype='float32',
-                                blocksize=CHUNK,
-                                callback=self._capture_callback,
-                            )
-                            self.stream.start()
-                            self.active_channels = 1
-                            print(f"[Session] Device {try_device} does not support stereo, using mono.")
-                        else:
-                            raise
+        devices_to_try = [device]
+        if selected_device is None and DEVICE_INDEX_FALLBACK not in devices_to_try:
+            devices_to_try.append(DEVICE_INDEX_FALLBACK)
 
-                    device = try_device
-                    print(f"[Transcription] Started (device {try_device}, channels={self.active_channels}, callback mode)")
-                    break
-                except sd.PortAudioError as e:
-                    if try_device != devices_to_try[-1]:
-                        print(f"[Session] Device {try_device} failed: {e}, trying fallback {devices_to_try[-1]}")
-                    else:
-                        print(f"[Session] Audio input error: {e}")
-                        self.is_running = False
-                        return
-        else:
+        for try_device in devices_to_try:
             try:
                 try:
                     self.stream = sd.InputStream(
-                        device=device,
+                        device=try_device,
                         samplerate=SAMPLE_RATE_CAPTURE,
                         channels=requested_channels,
-                        dtype='float32',
+                        dtype="float32",
+                        blocksize=CHUNK,
+                        callback=self._capture_callback,
                     )
                     self.stream.start()
                     self.active_channels = requested_channels
                 except sd.PortAudioError:
                     if requested_channels == 2:
                         self.stream = sd.InputStream(
-                            device=device,
+                            device=try_device,
                             samplerate=SAMPLE_RATE_CAPTURE,
                             channels=1,
-                            dtype='float32',
+                            dtype="float32",
+                            blocksize=CHUNK,
+                            callback=self._capture_callback,
                         )
                         self.stream.start()
                         self.active_channels = 1
-                        print(f"[Session] Device {device} does not support stereo, using mono.")
+                        print(f"[Session] Device {try_device} does not support stereo, using mono.")
                     else:
                         raise
-                print(f"[Transcription] Started (device {device}, channels={self.active_channels})")
+                print(f"[Transcription] Capture started (device {try_device}, channels={self.active_channels})")
+                break
             except sd.PortAudioError as e:
-                print(f"[Session] Audio input error: {e}")
-                self.is_running = False
-                return
+                if try_device != devices_to_try[-1]:
+                    print(f"[Session] Device {try_device} failed: {e}, trying fallback {devices_to_try[-1]}")
+                else:
+                    print(f"[Session] Audio input error: {e}")
+                    self.is_running = False
+                    return
+
+        self._bridge_thread = threading.Thread(target=self._bridge_main, args=(session_id,), daemon=True)
+        self._bridge_thread.start()
+        if not self._bridge_ready.wait(timeout=30.0):
+            print("[Session] WhisperLiveKit bridge failed to initialize.")
+            self.stop()
+            return
+        self._routing_ready.set()
 
         try:
-            if use_callback:
-                if self._stream_mode:
-                    # Start streaming transcription loop (rolling window + overlap)
-                    stream_thread = threading.Thread(target=self._stream_loop, args=(session_id,), daemon=True)
-                    stream_thread.start()
-                else:
-                    transcribe_thread = threading.Thread(target=self._run_transcription_worker, args=(session_start,), daemon=True)
-                    transcribe_thread.start()
-                rms_thread = threading.Thread(target=self._rms_display_loop, daemon=True)
-                rms_thread.start()
-                if not self._stream_mode:
-                    self._run_worker(session_start)
-                else:
-                    # In streaming mode, keep thread alive until stop() is called.
-                    while self.is_running and not self._stream_stop_event.is_set():
-                        time.sleep(0.25)
-            else:
-                # Blocking read path
-                chunks_per_second = SAMPLE_RATE_CAPTURE / CHUNK
-                min_chunks = int(MIN_SPEECH * chunks_per_second)
-                silence_limit = int(SILENCE_DURATION * chunks_per_second)
-                while self.is_running:
-                    frames = []
-                    silent_chunks = 0
-                    speaking_chunks = 0
-                    speech_start_time = None
-                    while True:
-                        data, _ = self.stream.read(CHUNK)
-                        if data is None or len(data) == 0:
-                            continue
-                        if data.ndim == 1 or data.shape[1] == 1:
-                            ch1_rms = np.sqrt(np.mean(data**2))
-                            ch2_rms = 0.0
-                        else:
-                            ch1_rms = np.sqrt(np.mean(data[:, 0]**2))
-                            ch2_rms = np.sqrt(np.mean(data[:, 1]**2))
-                        print(f"\rRMS -> Mic 1: {ch1_rms:.3f}, Mic 2: {ch2_rms:.3f}", end="")
-                        silent = max(ch1_rms, ch2_rms) < RMS_THRESHOLD
-                        if not silent and speech_start_time is None:
-                            speech_start_time = time.time() - session_start
-                        frames.append(data)
-                        if silent:
-                            silent_chunks += 1
-                        else:
-                            silent_chunks = 0
-                            speaking_chunks += 1
-                        if speaking_chunks > min_chunks and silent_chunks > silence_limit:
-                            break
-                    audio_chunk = np.concatenate(frames, axis=0)
-                    speech_end_time = time.time() - session_start
-                    self._process_segment(audio_chunk, speech_start_time, speech_end_time, session_start)
+            rms_thread = threading.Thread(target=self._rms_display_loop, daemon=True)
+            rms_thread.start()
+            while self.is_running and not self._stream_stop_event.is_set():
+                time.sleep(0.25)
         except Exception as e:
             print(f"[Session] Exception in audio loop: {e}")
         finally:
@@ -667,6 +490,7 @@ class TranscriptionSession:
 
     def stop(self):
         self.is_running = False
+        self._routing_ready.clear()
         self._stream_stop_event.set()
         if self.stream:
             try:
@@ -675,44 +499,16 @@ class TranscriptionSession:
             except Exception:
                 pass
             self.stream = None
+        if self._bridge_thread and self._bridge_thread.is_alive():
+            self._bridge_thread.join(timeout=8.0)
+        self._bridge_thread = None
 
     def get_full_transcript(self):
-        # In streaming mode, return the last emitted view (stable + interim),
-        # so Stop doesn't come back empty if nothing stabilized yet.
-        if getattr(self, "_stream_mode", False):
-            return self._last_full_text or "\n".join(self._lines) or ""
+        with self._wlk_display_lock:
+            if self._last_full_text.strip():
+                return self._last_full_text
         with self._transcript_lock:
             return "\n".join(self.transcripts)
-
-    def transcribe_audio(self, audio, speaker_label, start_time, end_time, queue_wait=0.0):
-        t0 = time.perf_counter()
-        audio = normalize_audio(audio)
-        # Resample to 16 kHz for Whisper if we captured at a different rate
-        audio = resample_audio(audio, SAMPLE_RATE_CAPTURE, SAMPLE_RATE_WHISPER)
-        wav_path = save_wav_file(audio, SAMPLE_RATE_WHISPER, 1)
-        start_stamp = format_timestamp(start_time)
-        end_stamp = format_timestamp(end_time)
-        try:
-            if self.model:
-                segments, _ = self.model.transcribe(wav_path)
-                text = " ".join([seg.text for seg in segments]).strip()
-            else:
-                text = "Simulated transcription"
-            if text:
-                elapsed = time.perf_counter() - t0
-                total = SILENCE_DURATION + queue_wait + elapsed
-                line = f"[{start_stamp} -> {end_stamp}] {speaker_label}: {text}" if speaker_label else f"[{start_stamp} -> {end_stamp}] {text}"
-                print(f"{NEON_GREEN}({elapsed:.1f} s transcribe, {total:.1f} s total): \"{text}\"{RESET_COLOR}\n")
-                return line
-            return ""
-        except Exception as e:
-            print(f"Transcription error ({speaker_label}): {e}")
-            return ""
-        finally:
-            try:
-                os.remove(wav_path)
-            except Exception:
-                pass
 
 #=========face analysis helpers=====================
 
@@ -781,16 +577,8 @@ def start_transcription():
 
     session = TranscriptionSession(device_index=device_index, channels=channels)
     active_sessions[session_id] = session
-
-    def on_transcription(text):
-        if session_id in active_sessions:
-            socketio.emit('transcription_update', {
-                'session_id': session_id,
-                'text': text,
-                'full_text': active_sessions[session_id].get_full_transcript()
-            })
-
-    session.callback = on_transcription
+    # Real-time emits: TranscriptionSession -> WhisperLiveKit /asr WebSocket -> socketio
+    session.callback = None
     thread = threading.Thread(target=session.start, args=(session_id,), daemon=True)
     thread.start()
 
@@ -806,15 +594,23 @@ def start_transcription():
 def list_transcription_devices():
     try:
         devices = sd.query_devices()
+        host_apis = sd.query_hostapis()
         input_devices = []
         for idx, dev in enumerate(devices):
             max_input_channels = int(dev.get('max_input_channels', 0) or 0)
             if max_input_channels > 0:
+                hostapi_idx = dev.get('hostapi')
+                hostapi_name = ""
+                if isinstance(hostapi_idx, (int, float)):
+                    hidx = int(hostapi_idx)
+                    if 0 <= hidx < len(host_apis):
+                        hostapi_name = host_apis[hidx].get('name', '')
                 input_devices.append({
                     'index': idx,
                     'name': dev.get('name', f'Input {idx}'),
                     'max_input_channels': max_input_channels,
-                    'default_samplerate': dev.get('default_samplerate')
+                    'default_samplerate': dev.get('default_samplerate'),
+                    'hostapi_name': hostapi_name,
                 })
         return jsonify({'devices': input_devices})
     except Exception as e:
@@ -851,6 +647,9 @@ def get_status():
         session = active_sessions[session_id]
         with session._transcript_lock:
             count = len(session.transcripts)
+        with session._wlk_display_lock:
+            if session._last_full_text.strip():
+                count = max(count, len([ln for ln in session._last_full_text.splitlines() if ln.strip()]))
         return jsonify({
             'active': session.is_running,
             'session_id': session_id,
