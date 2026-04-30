@@ -258,20 +258,60 @@ export default function ReportSummary() {
     enabled: !!visitIdParam && !isPreviousReportVisual,
   });
 
+  const { data: liveReport } = useQuery({
+    queryKey: ["visit-live-report", visitIdParam],
+    queryFn: async () => {
+      const res = await fetch(`http://localhost:5000/api/visits/${encodeURIComponent(visitIdParam)}/report`);
+      if (!res.ok) return null;
+      return res.json();
+    },
+    enabled: !!visitIdParam && !isPreviousReportVisual,
+    staleTime: 0,
+    refetchOnWindowFocus: true,
+  });
+
   const reportPkg = useMemo(
     () => ({ face: [], audio: [], gait: [], aiAssessment: null, transcriptionNlp: {}, visitSnapshot: {} }),
     []
   );
   const seededVisit = null;
+  const hasVisitTranscription = String(loadedVisit?.transcription || "").trim().length > 0;
+  const liveRows = useMemo(() => {
+    const sections = liveReport?.sections || {};
+    const normalizeRows = (section) => {
+      if (!section) return [];
+      const rows = [];
+      if (section.type) rows.push(section);
+      if (Array.isArray(section.windows)) rows.push(...section.windows);
+      if (Array.isArray(section.events)) rows.push(...section.events);
+      if (section.summary && typeof section.summary === "object") rows.push(section.summary);
+      return rows;
+    };
+    return {
+      face: normalizeRows(sections.face),
+      audio: normalizeRows(sections.audio),
+      gait: normalizeRows(sections.gait),
+    };
+  }, [liveReport]);
+  const liveAvailability = liveReport?.availability || {};
+  const hasLiveReport = !!liveReport;
   const face = isPreviousReportVisual
     ? reportPkg.face
-    : (loadedVisit?.multimodal_jsonl?.face || []);
+    : hasLiveReport
+      ? (liveAvailability.face === "available" ? liveRows.face : [])
+      : (loadedVisit?.multimodal_jsonl?.face || []);
   const audio = isPreviousReportVisual
     ? reportPkg.audio
-    : (loadedVisit?.multimodal_jsonl?.audio || []);
+    : (hasVisitTranscription
+        ? (hasLiveReport
+            ? (liveAvailability.audio === "available" ? liveRows.audio : [])
+            : (loadedVisit?.multimodal_jsonl?.audio || []))
+        : []);
   const gait = isPreviousReportVisual
     ? reportPkg.gait
-    : (loadedVisit?.multimodal_jsonl?.gait || []);
+    : hasLiveReport
+      ? (liveAvailability.gait === "available" ? liveRows.gait : [])
+      : (loadedVisit?.multimodal_jsonl?.gait || []);
   const [showFaceRaw, setShowFaceRaw] = useState(false);
   const [showAudioRaw, setShowAudioRaw] = useState(false);
   const [showGaitRaw, setShowGaitRaw] = useState(false);
@@ -770,8 +810,8 @@ export default function ReportSummary() {
           position: "right",
           min: 0,
           max: 1,
-          title: { display: true, text: "0–1", font: { size: 10 } },
-          ticks: { font: { size: 10 } },
+          title: { display: true, text: "%", font: { size: 10 } },
+          ticks: { callback: (v) => `${Math.round(v * 100)}%`, font: { size: 10 } },
           grid: { drawOnChartArea: false },
         },
       },

@@ -477,10 +477,61 @@ const handleStopFace = async () => {
 
   //====== Gait analysis handlers======================
 
+  const calcNormalizedGaitStability = ({
+    mlRmsM,
+    planarRmsM,
+    apRmsM,
+    trackingQuality,
+  }) => {
+    const toFinite = (v) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+    const clamp01 = (v) => Math.max(0, Math.min(1, v));
+    const scoreFromRms = (rms, cap = 0.12) => {
+      const n = toFinite(rms);
+      if (n == null) return null;
+      return clamp01(1 - Math.min(1, n / cap));
+    };
+
+    const ml = toFinite(mlRmsM);
+    const planar = toFinite(planarRmsM);
+    const ap = toFinite(apRmsM);
+
+    // AP often has large drift in current pipeline, so trust it only
+    // when it's in a physiologic range and close to planar magnitude.
+    const apLooksUsable =
+      ap != null &&
+      ap <= 0.2 &&
+      planar != null &&
+      Math.abs(ap - planar) <= 0.03;
+
+    const baseCandidates = [
+      { score: scoreFromRms(ml, 0.10), weight: 0.65 },       // lateral sway remains primary
+      { score: scoreFromRms(planar, 0.12), weight: 0.35 },   // planar adds context
+      { score: apLooksUsable ? scoreFromRms(ap, 0.12) : null, weight: 0.15 },
+    ].filter((x) => x.score != null);
+
+    if (baseCandidates.length === 0) return null;
+    const weightTotal = baseCandidates.reduce((s, x) => s + x.weight, 0);
+    const base = baseCandidates.reduce((s, x) => s + x.score * x.weight, 0) / weightTotal;
+
+    // Discount low-confidence runs so noisy captures do not look pathologic.
+    const q = clamp01(toFinite(trackingQuality) ?? 0.85);
+    const qualityFactor = 0.7 + 0.3 * q;
+    return clamp01(base * qualityFactor);
+  };
+
   const buildGaitJsonlRecord = (summary, visitId, patientId) => {
     const dur = Number(summary?.duration_s);
     const baseFeatures =
       summary?.features && typeof summary.features === 'object' ? summary.features : {};
+    const trackingQuality =
+      typeof summary?.tracking_quality_gait_ok_fraction === 'number'
+        ? summary.tracking_quality_gait_ok_fraction
+        : typeof summary?.tracking_quality_upper_ok_fraction === 'number'
+          ? summary.tracking_quality_upper_ok_fraction
+          : 0.85;
     return {
       ...summary,
       schema_version: 'v0.1',
@@ -492,12 +543,7 @@ const handleStopFace = async () => {
       t_start: 0,
       t_end: Number.isFinite(dur) ? dur : 0,
       valid: true,
-      confidence:
-        typeof summary?.tracking_quality_gait_ok_fraction === 'number'
-          ? summary.tracking_quality_gait_ok_fraction
-          : typeof summary?.tracking_quality_upper_ok_fraction === 'number'
-            ? summary.tracking_quality_upper_ok_fraction
-            : 0.85,
+      confidence: trackingQuality,
       features: {
         ...baseFeatures,
         avg_speed_mps:
@@ -507,18 +553,22 @@ const handleStopFace = async () => {
           null,
         avg_symmetry:
           summary?.knee_symmetry_index_percent != null
-            ? Number(summary.knee_symmetry_index_percent) / 100
+            // Lower symmetry-index percent means better symmetry.
+            ? Math.max(0, 1 - Math.min(1, Number(summary.knee_symmetry_index_percent) / 100))
             : baseFeatures.avg_symmetry ?? null,
         avg_stability:
-          summary?.stability_planar_rms_m != null
-            ? Math.max(0, 1 - Math.min(1, Number(summary.stability_planar_rms_m)))
-            : baseFeatures.avg_stability ?? null,
+          calcNormalizedGaitStability({
+            mlRmsM: summary?.stability_ml_rms_m,
+            planarRmsM: summary?.stability_planar_rms_m,
+            apRmsM: summary?.stability_ap_rms_m,
+            trackingQuality,
+          }) ?? baseFeatures.avg_stability ?? null,
       },
       notes: summary?.summary_text || summary?.notes || '',
     };
   };
 
-  const buildGaitWindowsFromEventRows = (rows, visitId) => {
+  const buildGaitWindowsFromEventRows = (rows, visitId, summary = null) => {
     if (!Array.isArray(rows) || rows.length === 0) return [];
     const frames = rows.filter((r) => r && r.event === 'gait_frame');
     if (frames.length === 0) return [];
@@ -526,7 +576,8 @@ const handleStopFace = async () => {
     const numericSpeed = frames
       .map((r) => Number(r.speed_norm))
       .filter((v) => Number.isFinite(v));
-    const speedScale = numericSpeed.length > 0 ? 1.0 : 1.0;
+    const summaryMeanSpeed = Number(summary?.mean_speed_mps);
+    const fallbackMeanSpeed = Number.isFinite(summaryMeanSpeed) ? summaryMeanSpeed : null;
 
     const toNum = (v, fallback = null) => {
       const n = Number(v);
@@ -547,7 +598,13 @@ const handleStopFace = async () => {
 
       const sway = toNum(row.trunk_sway);
       const stability = sway != null ? Math.max(0, 1 - Math.min(1, Math.abs(sway) / 0.04)) : null;
-      const speedMps = toNum(row.speed_norm) != null ? Number(row.speed_norm) * speedScale : null;
+      const speedFromFrame =
+        toNum(row.speed_mps) != null
+          ? Number(row.speed_mps)
+          : toNum(row.speed_norm) != null
+            ? Number(row.speed_norm)
+            : null;
+      const speedMps = speedFromFrame ?? fallbackMeanSpeed;
 
       return {
         schema_version: 'v0.1',
@@ -631,7 +688,7 @@ const handleStopFace = async () => {
                     }
                   })
                   .filter(Boolean);
-                const windows = buildGaitWindowsFromEventRows(rows, workingVisitId);
+                const windows = buildGaitWindowsFromEventRows(rows, workingVisitId, summary);
                 if (windows.length > 0) {
                   recordsToUpload = [summaryRecord, ...windows];
                 }

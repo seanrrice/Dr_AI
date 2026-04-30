@@ -254,8 +254,21 @@ def _compute_planar_stability_metrics(
     ap_series = np.dot(pelvis_centered, ap_axis)
     ml_series = np.dot(pelvis_centered, ml_axis)
 
-    ap_series = ap_series - np.mean(ap_series)
-    ml_series = ml_series - np.mean(ml_series)
+    # Remove slow drift and camera/pose tracking bias so RMS reflects sway,
+    # not long-trend translation through the scene.
+    def _detrend_and_clip(series: np.ndarray) -> np.ndarray:
+        if series.size < 5:
+            return series - np.mean(series)
+        x = np.arange(series.size, dtype=float)
+        coeff = np.polyfit(x, series, 1)
+        trend = coeff[0] * x + coeff[1]
+        residual = series - trend
+        lo, hi = np.percentile(residual, [2.0, 98.0])
+        residual = np.clip(residual, lo, hi)
+        return residual - np.mean(residual)
+
+    ap_series = _detrend_and_clip(ap_series)
+    ml_series = _detrend_and_clip(ml_series)
 
     ap_rms = float(np.sqrt(np.mean(ap_series ** 2)))
     ml_rms = float(np.sqrt(np.mean(ml_series ** 2)))
@@ -716,6 +729,7 @@ def capture_motion_realsense(
             "t_gait_s": [float(x) for x in np.array(t_g, dtype=float).tolist()],
             "left_knee_deg": [float(x) for x in lk_sm.tolist()],
             "right_knee_deg": [float(x) for x in rk_sm.tolist()],
+            "gait_speed_mps": [float(x) for x in speed_3d_sm.tolist()],
             "left_step_peak_idx": [int(i) for i in peaks_L],
             "right_step_peak_idx": [int(i) for i in peaks_R],
         })

@@ -363,12 +363,34 @@ function FaceTab({ data }) {
 
 function GaitTab({ data }) {
   const features = data.features || {};
+  const symmetryValue =
+    features.avg_symmetry != null ? Number(features.avg_symmetry) : Number(features.symmetry);
+  const stabilityValue =
+    features.avg_stability != null ? Number(features.avg_stability) : Number(features.stability);
+  const symmetryDisplay = Number.isFinite(symmetryValue)
+    ? (symmetryValue <= 1 ? `${(symmetryValue * 100).toFixed(0)}%` : `${symmetryValue.toFixed(1)}%`)
+    : null;
+  const stabilityDisplay = Number.isFinite(stabilityValue)
+    ? (stabilityValue <= 1 ? `${(stabilityValue * 100).toFixed(0)}%` : String(stabilityValue))
+    : null;
   return (
     <div className="space-y-5">
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         {features.speed_ms    && <StatBox label="Walking Speed" value={`${features.speed_ms} m/s`} color="blue" />}
-        {features.symmetry    && <StatBox label="Symmetry" value={`${features.symmetry}%`} color="teal" />}
-        {features.stability   && <StatBox label="Stability" value={features.stability} color="green" />}
+        {(features.symmetry != null || features.avg_symmetry != null) && (
+          <StatBox
+            label="Symmetry"
+            value={symmetryDisplay ?? "—"}
+            color="teal"
+          />
+        )}
+        {(features.stability != null || features.avg_stability != null) && (
+          <StatBox
+            label="Stability"
+            value={stabilityDisplay ?? "—"}
+            color="green"
+          />
+        )}
         {features.sit_to_stand && <StatBox label="Sit-to-Stand" value={`${features.sit_to_stand}s`} color="slate" />}
       </div>
       {Object.keys(features).length === 0 && (

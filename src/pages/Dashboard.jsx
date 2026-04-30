@@ -17,13 +17,18 @@ export default function Dashboard() {
     queryFn: () => api.entities.Patient.list('-created_date'),
   });
 
-  const { data: visits = [], isLoading: visitsLoading } = useQuery({
+  const { data: allVisits = [], isLoading: visitsLoading } = useQuery({
     queryKey: ['visits'],
+    queryFn: () => api.entities.Visit.list('-visit_date'),
+  });
+
+  const { data: visits = [] } = useQuery({
+    queryKey: ['visits', 'recent'],
     queryFn: () => api.entities.Visit.list('-visit_date', 10),
   });
 
   const totalPatients = patients.length;
-  const totalVisits = visits.length;
+  const totalVisits = allVisits.length;
 
   /** Show recent visits sorted by visit date. */
   const recentVisits = useMemo(() => {
@@ -95,7 +100,7 @@ export default function Dashboard() {
             </CardHeader>
             <CardContent>
               <div className="text-2xl font-semibold text-green-900">
-                {visits.filter(v => v.ai_assessment).length}
+                {allVisits.filter(v => v.ai_assessment).length}
               </div>
               <p className="text-xs text-green-600 mt-1">AI-powered diagnostics</p>
             </CardContent>

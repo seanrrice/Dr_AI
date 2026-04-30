@@ -107,8 +107,39 @@ def save_gait_jsonl(summary, jsonl_path, visit_id=None, patient_mrn=None):
         "timestamp_readable": time.strftime("%Y-%m-%d %H:%M:%S")
     }
 
+    frame_rows = []
+    ts_data = summary.get("timeseries") if isinstance(summary.get("timeseries"), dict) else {}
+    t_gait = ts_data.get("t_gait_s") if isinstance(ts_data.get("t_gait_s"), list) else []
+    left_knee = ts_data.get("left_knee_deg") if isinstance(ts_data.get("left_knee_deg"), list) else []
+    right_knee = ts_data.get("right_knee_deg") if isinstance(ts_data.get("right_knee_deg"), list) else []
+    ml_sway = ts_data.get("stability_ml_series_m") if isinstance(ts_data.get("stability_ml_series_m"), list) else []
+    gait_speed = ts_data.get("gait_speed_mps") if isinstance(ts_data.get("gait_speed_mps"), list) else []
+
+    frame_count = min(len(t_gait), len(left_knee), len(right_knee))
+    if frame_count > 0:
+        # If gait timestamps are present, emit per-frame rows so downstream code can
+        # construct report windows from true time-segmented gait data.
+        for idx in range(frame_count):
+            row = {
+                "event": "gait_frame",
+                "subsystem": "gait",
+                "visit_id": visit_id,
+                "patient_mrn": patient_mrn,
+                "frame_idx": idx,
+                "t_s": float(t_gait[idx]),
+                "left_knee_deg": float(left_knee[idx]),
+                "right_knee_deg": float(right_knee[idx]),
+            }
+            if idx < len(ml_sway):
+                row["trunk_sway"] = float(ml_sway[idx])
+            if idx < len(gait_speed):
+                row["speed_mps"] = float(gait_speed[idx])
+            frame_rows.append(row)
+
     with open(jsonl_path, "w", encoding="utf-8") as f:
         f.write(json.dumps(session_start) + "\n")
+        for row in frame_rows:
+            f.write(json.dumps(row) + "\n")
         f.write(json.dumps(gait_summary) + "\n")
         f.write(json.dumps(session_end) + "\n")
 

@@ -1252,10 +1252,23 @@ def rename_visit_folder():
         return jsonify({"error": "missing from/to"}), 400
     old_dir = _resolve_visit_dir(old_id, patient_mrn=patient_mrn, create=False)
     new_dir = _resolve_visit_dir(new_id, patient_mrn=patient_mrn, create=True)
+    try:
+        if old_dir.resolve() == new_dir.resolve():
+            print(f"[Visit] Rename no-op (same folder): {old_dir}")
+            return jsonify({"status": "ok", "note": "same-folder no-op"})
+    except Exception:
+        pass
+
     if old_dir.exists():
         new_dir.mkdir(parents=True, exist_ok=True)
         for file in old_dir.iterdir():
-            shutil.copy2(str(file), str(new_dir / file.name))
+            dst = new_dir / file.name
+            try:
+                if file.resolve() == dst.resolve():
+                    continue
+            except Exception:
+                pass
+            shutil.copy2(str(file), str(dst))
         print(f"[Visit] Copied folder: {old_dir} -> {new_dir}")
     return jsonify({"status": "ok"})
 
@@ -1626,7 +1639,7 @@ def integrate_visit(visit_id):
         canonical = _canonical_gait_section_from_records(gait_records)
         if canonical is not None:
             sections["gait"] = canonical
-        availability["gait"] = "available"
+            availability["gait"] = "available"
 
     # Extract MRN
     visit_id_clean = visit_id
