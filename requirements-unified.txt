@@ -31,7 +31,8 @@ flask-socketio==5.3.6
 python-socketio==5.10.0
 
 # --- Speech / transcription (DrAITranscription) ---
-whisperlivekit
+whisperlivekit==0.2.20
+python-multipart
 websockets>=13.0
 sounddevice==0.5.5
 av==16.0.1

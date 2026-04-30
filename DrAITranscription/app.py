@@ -13,6 +13,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import socket
 from pathlib import Path
 from datetime import datetime
 from urllib.parse import quote, urlparse
@@ -33,14 +34,25 @@ from emotion_pipeline.webcam_emotion_mediapipe import run_face_analysis
 from flask import Response
 
 # WhisperLiveKit: native WebSocket /asr (PCM) — VAC/VAD/chunking handled server-side
-WHISPERLIVEKIT_BASE_URL = os.environ.get("WHISPERLIVEKIT_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
+# Default to 8001 so it does not collide with the gait dev server on 8000.
+WHISPERLIVEKIT_BASE_URL = os.environ.get("WHISPERLIVEKIT_BASE_URL", "http://127.0.0.1:8001").rstrip("/")
 WHISPERLIVEKIT_WS_PATH = os.environ.get("WHISPERLIVEKIT_WS_PATH", "/asr")
+WHISPERLIVEKIT_WS_PATH_CANDIDATES = os.environ.get(
+    "WHISPERLIVEKIT_WS_PATH_CANDIDATES",
+    "/,/asr,/ws,/v1/asr,/v1/ws,/transcribe,/api/asr",
+)
 WHISPERLIVEKIT_AUTOSTART = os.environ.get("WHISPERLIVEKIT_AUTOSTART", "1").strip().lower() not in ("0", "false", "no")
-WHISPERLIVEKIT_MODEL = os.environ.get("WHISPERLIVEKIT_MODEL", "small.en")
-WHISPERLIVEKIT_LANGUAGE = os.environ.get("WHISPERLIVEKIT_LANGUAGE", "auto")
-WHISPERLIVEKIT_HEALTH_TIMEOUT_S = float(os.environ.get("WHISPERLIVEKIT_HEALTH_TIMEOUT_S", "60"))
-# Extra CLI args for whisperlivekit-server (e.g. --vac-chunk-size 0.04 --min-chunk-size 0.1 --backend faster-whisper)
-WHISPERLIVEKIT_SERVER_EXTRA_ARGS = os.environ.get("WHISPERLIVEKIT_SERVER_EXTRA_ARGS", "")
+WHISPERLIVEKIT_MODEL = os.environ.get("WHISPERLIVEKIT_MODEL", "base.en")
+WHISPERLIVEKIT_LANGUAGE = os.environ.get("WHISPERLIVEKIT_LANGUAGE", "en")
+WHISPERLIVEKIT_BACKEND = os.environ.get("WHISPERLIVEKIT_BACKEND", "faster-whisper")
+WHISPERLIVEKIT_HEALTH_TIMEOUT_S = float(os.environ.get("WHISPERLIVEKIT_HEALTH_TIMEOUT_S", "3"))
+WHISPERLIVEKIT_STARTUP_TIMEOUT_S = float(os.environ.get("WHISPERLIVEKIT_STARTUP_TIMEOUT_S", "180"))
+# Extra CLI args for whisperlivekit-server.
+# Lower chunk sizes improve perceived latency for live partials.
+WHISPERLIVEKIT_SERVER_EXTRA_ARGS = os.environ.get(
+    "WHISPERLIVEKIT_SERVER_EXTRA_ARGS",
+    "--vac-chunk-size 0.04 --min-chunk-size 0.08",
+)
 
 # ================= CONFIG =================
 # Try device 24 first (may give true stereo on some drivers); fallback to 15
@@ -96,7 +108,7 @@ def _parse_http_host_port(base_url: str):
     elif u.scheme == "https":
         port = 443
     else:
-        port = 8000
+        port = 8001
     return host, port
 
 
@@ -106,7 +118,7 @@ def _http_to_ws_base(base_url: str) -> str:
     host = u.hostname or "127.0.0.1"
     port = u.port
     if port is None:
-        port = 443 if u.scheme == "https" else 8000
+        port = 443 if u.scheme == "https" else 8001
     return f"{scheme}://{host}:{port}"
 
 
@@ -119,12 +131,44 @@ def _build_asr_websocket_url() -> str:
     return f"{base}{path}"
 
 
+def _candidate_asr_websocket_urls():
+    base = _http_to_ws_base(WHISPERLIVEKIT_BASE_URL)
+    lang = (WHISPERLIVEKIT_LANGUAGE or "").strip().lower()
+    raw_candidates = ["/", WHISPERLIVEKIT_WS_PATH] + [
+        p.strip() for p in str(WHISPERLIVEKIT_WS_PATH_CANDIDATES or "").split(",") if p.strip()
+    ]
+    seen = set()
+    urls = []
+    for raw in raw_candidates:
+        path = raw if str(raw).startswith("/") else f"/{raw}"
+        if path in seen:
+            continue
+        seen.add(path)
+        if lang and lang not in ("auto", "none"):
+            urls.append(f"{base}{path}?language={quote(WHISPERLIVEKIT_LANGUAGE)}")
+        else:
+            urls.append(f"{base}{path}")
+    return urls
+
+
 def _health_ping_ok(url: str) -> bool:
     try:
         req = urllib.request.Request(url, method="GET")
         with urllib.request.urlopen(req, timeout=2.0) as resp:
             return 200 <= resp.status < 300
+    except urllib.error.HTTPError as e:
+        # Some ASR servers are reachable but do not implement /health and return
+        # HTTP errors like 404. Treat non-5xx as reachable so startup can proceed.
+        return 400 <= int(getattr(e, "code", 0)) < 500
     except (urllib.error.URLError, TimeoutError, OSError):
+        return False
+
+
+def _tcp_port_open(host: str, port: int) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=1.0):
+            return True
+    except OSError:
         return False
 
 
@@ -133,10 +177,20 @@ class WhisperLiveKitProcess:
 
     _lock = Lock()
     _proc = None
+    _log_path = REPO_ROOT / "runs" / "whisperlivekit_server.log"
 
     @classmethod
     def _is_running(cls):
         return cls._proc is not None and cls._proc.poll() is None
+
+    @classmethod
+    def get_exit_code_if_stopped(cls):
+        if cls._proc is None:
+            return None
+        code = cls._proc.poll()
+        if code is None:
+            return None
+        return code
 
     @classmethod
     def ensure_started(cls):
@@ -149,6 +203,8 @@ class WhisperLiveKitProcess:
             "--port",
             str(port),
             "--pcm-input",
+            "--backend",
+            WHISPERLIVEKIT_BACKEND,
             "--model",
             WHISPERLIVEKIT_MODEL,
             "--lan",
@@ -158,18 +214,41 @@ class WhisperLiveKitProcess:
         with cls._lock:
             if cls._is_running():
                 return
-            server_exe = shutil.which("whisperlivekit-server")
-            if server_exe:
-                cmd = [server_exe] + argv_core + extra
-            else:
-                cmd = [sys.executable, "-m", "whisperlivekit.basic_server"] + argv_core + extra
+            # Always launch through the currently running Python interpreter so
+            # we use the same venv/package set as this Flask app.
+            cmd = [sys.executable, "-m", "whisperlivekit.basic_server"] + argv_core + extra
             try:
+                cls._log_path.parent.mkdir(parents=True, exist_ok=True)
+                log_f = open(cls._log_path, "a", encoding="utf-8")
+                log_f.write(
+                    f"\n[{datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')}] "
+                    f"Launching WhisperLiveKit: {' '.join(cmd)}\n"
+                )
+                log_f.flush()
                 cls._proc = subprocess.Popen(
                     cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    stdout=log_f,
+                    stderr=log_f,
+                    env={
+                        **os.environ,
+                        # Keep WhisperLiveKit on CPU unless user explicitly overrides.
+                        "CT2_FORCE_CPU": os.environ.get("CT2_FORCE_CPU", "1"),
+                        "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", "-1"),
+                    },
                 )
-                print(f"[WhisperLiveKit] Started server ({' '.join(cmd[:3])} …) on {host}:{port} (--pcm-input)")
+                # Give the process a moment: if it exits immediately, surface a useful hint.
+                time.sleep(0.4)
+                if cls._proc.poll() is not None:
+                    exit_code = cls._proc.returncode
+                    cls._proc = None
+                    print(
+                        f"[WhisperLiveKit] Server exited immediately (code {exit_code}) on {host}:{port}. "
+                        "Likely startup/runtime error. Check runs/whisperlivekit_server.log."
+                    )
+                    return
+                print(
+                    f"[WhisperLiveKit] Started server ({' '.join(cmd[:3])} …) on {host}:{port} (--pcm-input)"
+                )
             except Exception as e:
                 cls._proc = None
                 print(f"[WhisperLiveKit] Failed to autostart server: {e}")
@@ -200,6 +279,8 @@ class TranscriptionSession:
         self._routing_ready = threading.Event()
         self._wlk_blocks = {"Mic 1": "", "Mic 2": ""}
         self._wlk_display_lock = threading.Lock()
+        self._wlk_connected_lock = threading.Lock()
+        self._wlk_connected_mics = set()
         self._last_full_text = ""
         self._last_interim_lines = []
 
@@ -283,68 +364,137 @@ class TranscriptionSession:
     async def _await_wlk_health(self):
         url = f"{WHISPERLIVEKIT_BASE_URL}/health"
         deadline = time.time() + WHISPERLIVEKIT_HEALTH_TIMEOUT_S
-        while time.time() < deadline:
+        while self.is_running and time.time() < deadline:
             if _health_ping_ok(url):
-                return
+                return True
             await asyncio.sleep(0.25)
-        raise RuntimeError(
-            f"WhisperLiveKit server not reachable at {url} "
-            "(start it manually or fix WHISPERLIVEKIT_BASE_URL; set WHISPERLIVEKIT_AUTOSTART=0 if it runs separately)"
+        if not self.is_running:
+            return False
+        print(
+            f"[WhisperLiveKit] Health endpoint not reachable at {url}; "
+            "continuing with direct WS connection attempts.",
+            flush=True,
         )
+        return False
+
+    async def _await_wlk_port_open(self):
+        host, port = _parse_http_host_port(WHISPERLIVEKIT_BASE_URL)
+        deadline = time.time() + WHISPERLIVEKIT_STARTUP_TIMEOUT_S
+        while self.is_running and time.time() < deadline:
+            exit_code = WhisperLiveKitProcess.get_exit_code_if_stopped()
+            if exit_code is not None:
+                print(
+                    f"[WhisperLiveKit] Server process exited before port became reachable "
+                    f"(exit_code={exit_code}, target={host}:{port}).",
+                    flush=True,
+                )
+                return False
+            if _tcp_port_open(host, port):
+                print(f"[WhisperLiveKit] Port is now reachable at {host}:{port}", flush=True)
+                return True
+            await asyncio.sleep(0.5)
+        if not self.is_running:
+            return False
+        print(
+            f"[WhisperLiveKit] Port did not open at {host}:{port} within "
+            f"{WHISPERLIVEKIT_STARTUP_TIMEOUT_S:.0f}s",
+            flush=True,
+        )
+        return False
 
     async def _run_one_mic_ws(self, session_id: str, mic_label: str, pcm_queue: asyncio.Queue):
-        uri = _build_asr_websocket_url()
-        try:
-            async with websockets.connect(uri, max_size=None) as ws:
-                raw = await ws.recv()
-                if isinstance(raw, str):
-                    try:
-                        json.loads(raw)
-                    except json.JSONDecodeError:
-                        pass
-
-                async def sender():
-                    try:
-                        while self.is_running:
+        urls = _candidate_asr_websocket_urls()
+        last_error = None
+        round_idx = 0
+        # Keep trying for a short warmup window so server startup race doesn't
+        # leave the session without WS connectivity.
+        while self.is_running and round_idx < 8:
+            round_idx += 1
+            for attempt, uri in enumerate(urls, start=1):
+                try:
+                    print(
+                        f"[WhisperLiveKit] Connecting {mic_label} WS "
+                        f"(round {round_idx}, {attempt}/{len(urls)}): {uri}"
+                    , flush=True)
+                    async with websockets.connect(uri, max_size=None) as ws:
+                        with self._wlk_connected_lock:
+                            self._wlk_connected_mics.add(mic_label)
+                        raw = await ws.recv()
+                        if isinstance(raw, str):
                             try:
-                                chunk = await asyncio.wait_for(pcm_queue.get(), timeout=0.05)
-                            except asyncio.TimeoutError:
-                                continue
-                            await ws.send(chunk)
-                    finally:
-                        try:
-                            await ws.send(b"")
-                        except Exception:
-                            pass
+                                json.loads(raw)
+                            except json.JSONDecodeError:
+                                pass
 
-                async def receiver():
-                    while self.is_running:
-                        try:
-                            raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
-                        except asyncio.TimeoutError:
-                            continue
-                        except websockets.exceptions.ConnectionClosed:
-                            break
-                        if isinstance(raw, bytes):
-                            continue
-                        try:
-                            msg = json.loads(raw)
-                        except json.JSONDecodeError:
-                            continue
-                        mtype = msg.get("type")
-                        if mtype == "ready_to_stop":
-                            break
-                        if mtype == "config":
-                            continue
-                        self._emit_wlk_update(session_id, mic_label, msg)
+                        print(f"[WhisperLiveKit] Connected {mic_label} WS: {uri}", flush=True)
 
-                await asyncio.gather(sender(), receiver())
-        except Exception as e:
-            print(f"[WhisperLiveKit] WebSocket error ({mic_label}): {e}")
+                        async def sender():
+                            try:
+                                while self.is_running:
+                                    try:
+                                        chunk = await asyncio.wait_for(pcm_queue.get(), timeout=0.05)
+                                    except asyncio.TimeoutError:
+                                        continue
+                                    await ws.send(chunk)
+                            finally:
+                                try:
+                                    await ws.send(b"")
+                                except Exception:
+                                    pass
+
+                        async def receiver():
+                            while self.is_running:
+                                try:
+                                    raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                                except asyncio.TimeoutError:
+                                    continue
+                                except websockets.exceptions.ConnectionClosed:
+                                    break
+                                if isinstance(raw, bytes):
+                                    continue
+                                try:
+                                    msg = json.loads(raw)
+                                except json.JSONDecodeError:
+                                    continue
+                                mtype = msg.get("type")
+                                if mtype == "ready_to_stop":
+                                    break
+                                if mtype == "config":
+                                    continue
+                                self._emit_wlk_update(session_id, mic_label, msg)
+
+                        await asyncio.gather(sender(), receiver())
+                        return
+                except Exception as e:
+                    last_error = e
+                    msg = str(e)
+                    # Continue trying alternate endpoints if this one is missing.
+                    if "HTTP 404" in msg or "404" in msg:
+                        print(f"[WhisperLiveKit] WS endpoint not found for {mic_label}: {uri}", flush=True)
+                        continue
+                    print(f"[WhisperLiveKit] WebSocket error ({mic_label}) at {uri}: {e}", flush=True)
+                    continue
+                finally:
+                    with self._wlk_connected_lock:
+                        self._wlk_connected_mics.discard(mic_label)
+            await asyncio.sleep(0.5)
+        if last_error is not None:
+            print(f"[WhisperLiveKit] Failed to connect {mic_label} WS after retries: {last_error}", flush=True)
 
     async def _wlk_session_main(self, session_id: str):
+        print(f"[WhisperLiveKit] Bridge session starting for {session_id}", flush=True)
         WhisperLiveKitProcess.ensure_started()
-        await self._await_wlk_health()
+        health_ok = await self._await_wlk_health()
+        print(f"[WhisperLiveKit] Health check result for {session_id}: {health_ok}", flush=True)
+        # On first run WhisperLiveKit can spend significant time downloading/loading
+        # the model before it starts listening. Wait for port readiness to avoid
+        # immediate WS connection-refused loops.
+        port_ready = await self._await_wlk_port_open()
+        if not port_ready:
+            print(f"[WhisperLiveKit] Port not ready for session {session_id}; skipping WS streaming.", flush=True)
+            return
+        if not self.is_running:
+            return
         if self.active_channels == 2:
             await asyncio.gather(
                 self._run_one_mic_ws(session_id, "Mic 1", self._pcm_q_ch1),
@@ -354,6 +504,7 @@ class TranscriptionSession:
             await self._run_one_mic_ws(session_id, "Mic 1", self._pcm_q_ch1)
 
     def _bridge_main(self, session_id: str):
+        print(f"[WhisperLiveKit] Bridge thread booting for {session_id}", flush=True)
         loop = asyncio.new_event_loop()
         self._wlk_loop = loop
         asyncio.set_event_loop(loop)
@@ -621,13 +772,19 @@ def stop_transcription():
     data = request.get_json(silent=True)
     session_id = (data or {}).get('session_id', 'default')
 
-    if session_id not in active_sessions:
-        return jsonify({'error': 'Session not found'}), 404
+    # Idempotent stop: if a duplicate stop arrives after a successful stop,
+    # return success instead of 404/500 so the UI can settle cleanly.
+    session = active_sessions.pop(session_id, None)
+    if session is None:
+        return jsonify({
+            'success': True,
+            'session_id': session_id,
+            'full_text': '',
+            'message': 'Session already stopped'
+        })
 
-    session = active_sessions[session_id]
     session.stop()
     full_transcript = session.get_full_transcript()
-    del active_sessions[session_id]
 
     socketio.emit('transcription_complete', {
         'session_id': session_id,
@@ -653,7 +810,9 @@ def get_status():
         return jsonify({
             'active': session.is_running,
             'session_id': session_id,
-            'transcript_count': count
+            'transcript_count': count,
+            'expected_mics': session.active_channels,
+            'connected_mics': len(session._wlk_connected_mics),
         })
     return jsonify({'active': False, 'session_id': session_id})
 

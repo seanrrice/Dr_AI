@@ -19,11 +19,38 @@ const FLASK_URL = "http://localhost:5000"; //for facial analysis
 
 function formatTranscriptionForDisplay(text, useSpeakerLabels = true) {
   if (!text) return text;
+  const simplifyTimestamp = (ts) => {
+    const parts = String(ts || "").trim().split(":").map((p) => Number.parseFloat(p));
+    if (parts.some((n) => !Number.isFinite(n))) return String(ts || "").trim();
+    let totalSeconds = 0;
+    if (parts.length === 3) {
+      totalSeconds = parts[0] * 3600 + parts[1] * 60 + parts[2];
+    } else if (parts.length === 2) {
+      totalSeconds = parts[0] * 60 + parts[1];
+    } else {
+      return String(ts || "").trim();
+    }
+    const s = Math.max(0, Math.floor(totalSeconds));
+    const hh = Math.floor(s / 3600);
+    const mm = Math.floor((s % 3600) / 60);
+    const ss = s % 60;
+    if (hh > 0) return `${hh}:${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+    return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+  };
+
+  let out = String(text)
+    .replace(
+      /\[([0-9:.]+)\s*(?:->|→)\s*([0-9:.]+)\]/g,
+      (_, startTs, endTs) => `[${simplifyTimestamp(startTs)} -> ${simplifyTimestamp(endTs)}]`
+    );
+
   if (!useSpeakerLabels) {
     // In mono mode, remove speaker tags instead of mapping to Patient/Doctor.
-    return text.replace(/(\]\s*)Mic\s*\d+\s*:\s*/g, "$1");
+    out = out.replace(/(\]\s*)Mic\s*\d+\s*:\s*/g, "$1");
+  } else {
+    out = out.replace(/Mic 1/g, "Patient").replace(/Mic 2/g, "Doctor");
   }
-  return text.replace(/Mic 1/g, "Patient").replace(/Mic 2/g, "Doctor");
+  return out;
 }
 
 function normalizeTranscriptLineForDedup(line) {
@@ -36,7 +63,20 @@ function normalizeTranscriptLineForDedup(line) {
 
 function parseTranscriptLine(line) {
   const raw = String(line || "").trim();
-  const match = raw.match(/^\[(\d+):(\d+)\s*(?:->|→)\s*(\d+):(\d+)\]\s*([^:]+):\s*(.*)$/);
+  const parseTimestampToSeconds = (value) => {
+    const parts = String(value || "").trim().split(":");
+    if (parts.length < 2 || parts.length > 3) return null;
+    const nums = parts.map((part) => Number.parseFloat(part));
+    if (nums.some((n) => !Number.isFinite(n))) return null;
+    if (nums.length === 2) {
+      const [mm, ss] = nums;
+      return mm * 60 + ss;
+    }
+    const [hh, mm, ss] = nums;
+    return hh * 3600 + mm * 60 + ss;
+  };
+
+  const match = raw.match(/^\[([0-9:.]+)\s*(?:->|→)\s*([0-9:.]+)\]\s*([^:]+):\s*(.*)$/);
   if (!match) {
     return {
       raw,
@@ -47,12 +87,12 @@ function parseTranscriptLine(line) {
       normalized: normalizeTranscriptLineForDedup(raw),
     };
   }
-  const [, sm, ss, em, es, speaker, text] = match;
+  const [, startTs, endTs, speaker, text] = match;
   return {
     raw,
     speaker: String(speaker || "").trim(),
-    startSeconds: Number(sm) * 60 + Number(ss),
-    endSeconds: Number(em) * 60 + Number(es),
+    startSeconds: parseTimestampToSeconds(startTs),
+    endSeconds: parseTimestampToSeconds(endTs),
     text: String(text || "").trim(),
     normalized: normalizeTranscriptLineForDedup(text),
   };
@@ -83,6 +123,23 @@ function mergeTranscriptLine(lines, incomingLine) {
   const next = Array.isArray(lines) ? [...lines] : [];
   const incomingDisplay = String(incomingLine || "").trim();
   if (!incomingDisplay) return next;
+  const incomingParsed = parseTranscriptLine(incomingDisplay);
+  const incomingIsTimestamped = incomingParsed.startSeconds != null && !!incomingParsed.speaker;
+
+  // If a finalized/timestamped line arrives, remove plain-text fragments that it supersedes.
+  if (incomingIsTimestamped) {
+    const compactIncoming = incomingParsed.normalized;
+    for (let i = next.length - 1; i >= 0; i -= 1) {
+      const parsed = parseTranscriptLine(next[i]);
+      const isPlainFragment = parsed.startSeconds == null || !parsed.speaker;
+      if (!isPlainFragment) continue;
+      const compactExisting = parsed.normalized;
+      if (!compactExisting) continue;
+      if (compactIncoming.includes(compactExisting) || compactExisting.includes(compactIncoming)) {
+        next.splice(i, 1);
+      }
+    }
+  }
 
   for (let i = next.length - 1; i >= 0; i -= 1) {
     const existing = next[i];
@@ -159,6 +216,7 @@ export default function NewVisit() {
   const [audioDevicesError, setAudioDevicesError] = useState(null);
   const [selectedAudioDevice, setSelectedAudioDevice] = useState("default");
   const [channelMode, setChannelMode] = useState("2");
+  const [transcriptionReady, setTranscriptionReady] = useState(false);
 
   // Gait refs/state
   const [isGaitRunning, setIsGaitRunning] = useState(false);
@@ -636,21 +694,41 @@ const handleStopFace = async () => {
     if (isTranscribing) {
       transcriptionListenerRef.current = transcriptionService.addListener(async (event, data) => {
         if (event === 'update') {
+          setTranscriptionReady(true);
           const candidateLines = [];
+          const timestampedLines = [];
+          const plainLines = [];
           if (Array.isArray(data?.interim)) {
-            candidateLines.push(...data.interim.filter(Boolean).map((x) => String(x).trim()));
+            for (const line of data.interim.filter(Boolean).map((x) => String(x).trim())) {
+              if (/^\[[0-9:.]+\s*(?:->|→)\s*[0-9:.]+\]\s*[^:]+:\s*/.test(line)) {
+                timestampedLines.push(line);
+              } else {
+                plainLines.push(line);
+              }
+            }
           }
           if (String(data?.text || "").trim()) {
-            candidateLines.push(String(data.text).trim());
+            const line = String(data.text).trim();
+            if (/^\[[0-9:.]+\s*(?:->|→)\s*[0-9:.]+\]\s*[^:]+:\s*/.test(line)) {
+              timestampedLines.push(line);
+            } else {
+              plainLines.push(line);
+            }
           }
           if (String(data?.full_text || "").trim()) {
-            candidateLines.push(
-              ...String(data.full_text)
-                .split(/\r?\n/)
-                .map((x) => x.trim())
-                .filter(Boolean)
-            );
+            for (const line of String(data.full_text)
+              .split(/\r?\n/)
+              .map((x) => x.trim())
+              .filter(Boolean)) {
+              if (/^\[[0-9:.]+\s*(?:->|→)\s*[0-9:.]+\]\s*[^:]+:\s*/.test(line)) {
+                timestampedLines.push(line);
+              } else {
+                plainLines.push(line);
+              }
+            }
           }
+          // Prefer timestamped lines over plain fragments in the same update.
+          candidateLines.push(...timestampedLines, ...(timestampedLines.length ? [] : plainLines));
 
           const appended = [];
           for (const rawLine of candidateLines) {
@@ -702,10 +780,12 @@ const handleStopFace = async () => {
           });
           interimTranscriptRef.current = "";
           setIsTranscribing(false);
+          setTranscriptionReady(false);
 
         } else if (event === 'error') {
           setTranscriptionError(data.message);
           setIsTranscribing(false);
+          setTranscriptionReady(false);
         }
       });
     }
@@ -717,6 +797,31 @@ const handleStopFace = async () => {
       }
     };
   }, [isTranscribing, channelMode]);
+
+  useEffect(() => {
+    if (!isTranscribing || transcriptionReady) return;
+    const expected = channelMode === "2" ? 2 : 1;
+    let closed = false;
+    const poll = async () => {
+      try {
+        const status = await transcriptionService.getStatus();
+        if (closed) return;
+        const connected = Number(status?.connected_mics ?? 0);
+        const expectedMics = Number(status?.expected_mics ?? expected);
+        if (connected >= Math.max(1, expectedMics)) {
+          setTranscriptionReady(true);
+        }
+      } catch {
+        // keep polling while waiting for channels
+      }
+    };
+    poll();
+    const timer = setInterval(poll, 800);
+    return () => {
+      closed = true;
+      clearInterval(timer);
+    };
+  }, [isTranscribing, transcriptionReady, channelMode]);
 
   const createPatientMutation = useMutation({
     mutationFn: (patientData) => api.entities.Patient.create(patientData),
@@ -786,6 +891,7 @@ const handleStopFace = async () => {
     try {
       setTranscriptionError(null);
       setIsStartingTranscription(true);
+      setTranscriptionReady(false);
       committedTranscriptRef.current = "";
       committedTranscriptLinesRef.current = [];
       interimTranscriptRef.current = "";
@@ -832,11 +938,13 @@ const handleStopFace = async () => {
         return prev;
       });
       setIsTranscribing(false);
+      setTranscriptionReady(false);
       setTranscriptionError(null);
     } catch (error) {
       console.error('Failed to stop transcription:', error);
       setTranscriptionError(error.message || 'Failed to stop transcription');
       setIsTranscribing(false);
+      setTranscriptionReady(false);
     }
   };
 
@@ -1572,10 +1680,17 @@ const handleStopFace = async () => {
               )}
               {isTranscribing && !isStartingTranscription && (
                 <div className="space-y-1">
-                  <div className="flex items-center gap-2 text-xs text-blue-600">
-                    <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
-                    <span>Recording... Speak clearly into your microphone</span>
-                  </div>
+                  {!transcriptionReady ? (
+                    <div className="flex items-center gap-2 text-xs text-teal-600">
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      <span>Loading... connecting both microphones</span>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 text-xs text-blue-600">
+                      <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
+                      <span>Recording... Speak clearly into your microphone</span>
+                    </div>
+                  )}
                 </div>
               )}
               {transcriptionError && (
