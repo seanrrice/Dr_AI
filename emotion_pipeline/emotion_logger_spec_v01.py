@@ -57,6 +57,7 @@ class EmotionVisitLogger:
             visit_duration: Optional[float] = None,
             t_start: Optional[float] = None,  # NEW: For orchestrator mode
             t_end: Optional[float] = None,    # NEW: For orchestrator mode
+            quality_metrics: Optional[Mapping[str, Any]] = None,
     ):
         """
         Log a single visit summary (type="summary") per Doctor AI spec v0.1.
@@ -84,6 +85,8 @@ class EmotionVisitLogger:
         
         if meta is None:
             meta = {}
+        if quality_metrics is None:
+            quality_metrics = {}
         
         patient_id = meta.get("patient_id", "")
         if not patient_id:
@@ -99,6 +102,26 @@ class EmotionVisitLogger:
             pct = round((count / total_samples) * 100.0, 2)
             emotion_counts_dict[lowercase_key] = count
             emotion_pct_dict[lowercase_key] = pct
+
+        frame_count = int(quality_metrics.get("frame_count") or 0)
+        detected_frame_count = int(quality_metrics.get("detected_frame_count") or 0)
+        mean_model_conf = float(quality_metrics.get("mean_model_confidence") or 0.0)
+        prediction_switches = int(quality_metrics.get("prediction_switches") or 0)
+        prediction_transitions = int(quality_metrics.get("prediction_transitions") or 0)
+
+        tracking_ratio = (
+            min(1.0, max(0.0, detected_frame_count / frame_count))
+            if frame_count > 0 else 0.0
+        )
+        stability_score = (
+            1.0 - min(1.0, max(0.0, prediction_switches / max(1, prediction_transitions)))
+            if prediction_transitions > 0 else 1.0
+        )
+        mean_model_conf = min(1.0, max(0.0, mean_model_conf))
+        computed_confidence = min(
+            1.0,
+            max(0.0, 0.6 * mean_model_conf + 0.25 * tracking_ratio + 0.15 * stability_score)
+        )
         
         # Determine t_start and t_end
         # If custom times provided (orchestrator mode), use them
@@ -132,10 +155,20 @@ class EmotionVisitLogger:
                 # Optional: include raw timestamp for reference
                 "timestamp": visit_time,
                 "visit_label": meta.get("visit_label", ""),
+                "quality": {
+                    "frame_count": frame_count,
+                    "detected_frame_count": detected_frame_count,
+                    "tracking_ratio": round(tracking_ratio, 4),
+                    "mean_model_confidence": round(mean_model_conf, 4),
+                    "prediction_switches": prediction_switches,
+                    "prediction_transitions": prediction_transitions,
+                    "stability_score": round(stability_score, 4),
+                    "confidence_formula": "0.6*mean_model_confidence + 0.25*tracking_ratio + 0.15*stability_score",
+                },
             },
             
             # Quality metadata
-            "confidence": 1.0,  # Full confidence in summary (aggregated data)
+            "confidence": round(computed_confidence, 4),
             "valid": True,      # Data is valid
             
             # Optional but recommended fields

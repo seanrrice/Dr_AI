@@ -201,6 +201,13 @@ def run_face_analysis(
     emotion_counts = Counter()
     total_samples = 0
     latency_history = []
+    frame_count = 0
+    detected_frame_count = 0
+    model_conf_sum = 0.0
+    model_conf_count = 0
+    prediction_switches = 0
+    prediction_transitions = 0
+    prev_smoothed_label = None
 
     cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
     print(f"[INFO] Opening camera index {camera_index}")
@@ -226,6 +233,7 @@ def run_face_analysis(
                 if not ret:
                     print("[WARN] Failed to grab frame")
                     break
+                frame_count += 1
 
                 h, w, _ = frame.shape
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -234,6 +242,7 @@ def run_face_analysis(
                 smoothed_label = None
 
                 if results.detections:
+                    detected_frame_count += 1
                     for detection in results.detections:
                         bbox = detection.location_data.relative_bounding_box
                         x_min = int(bbox.xmin * w)
@@ -254,11 +263,18 @@ def run_face_analysis(
 
                         if conf > CONF_THRESHOLD:
                             label_history.append(label)
+                            model_conf_sum += float(conf)
+                            model_conf_count += 1
 
                         now = time.time()
                         if now - last_log_time >= LOG_INTERVAL_SEC:
                             smoothed_label = get_smoothed_label(label_history)
                             if smoothed_label is not None:
+                                if prev_smoothed_label is not None:
+                                    prediction_transitions += 1
+                                    if smoothed_label != prev_smoothed_label:
+                                        prediction_switches += 1
+                                prev_smoothed_label = smoothed_label
                                 emotion_counts[smoothed_label] += 1
                                 total_samples += 1
                             last_log_time = now
@@ -329,6 +345,13 @@ def run_face_analysis(
             visit_duration=face_duration,
             t_start=log_t_start,
             t_end=log_t_end,
+            quality_metrics={
+                "frame_count": frame_count,
+                "detected_frame_count": detected_frame_count,
+                "mean_model_confidence": (model_conf_sum / model_conf_count) if model_conf_count > 0 else 0.0,
+                "prediction_switches": prediction_switches,
+                "prediction_transitions": prediction_transitions,
+            },
             meta={
                 "patient_id": patient_id,
                 "visit_label": visit_label,

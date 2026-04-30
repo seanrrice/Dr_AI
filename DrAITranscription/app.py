@@ -1664,6 +1664,8 @@ def integrate_visit(visit_id):
             "type": "summary", "subsystem": "face",
             "t_start": summary.get("t_start") if summary else None,
             "t_end": summary.get("t_end") if summary else None,
+            "confidence": summary.get("confidence") if summary else None,
+            "valid": summary.get("valid") if summary else None,
             "total_samples": features.get("total_samples", 0),
             "dominant_emotion": dominant,
             "emotion_pct": emotion_pct,
