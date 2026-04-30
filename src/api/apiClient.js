@@ -115,11 +115,13 @@ export const api = {
       },
 
       update: async (id, data) => {
-        return flaskPatch(`/api/visits/${id}`, data);
+        const mrn = data?.patient_mrn ? `?patient_mrn=${encodeURIComponent(data.patient_mrn)}` : '';
+        return flaskPatch(`/api/visits/${id}${mrn}`, data);
       },
 
-      delete: async (id) => {
-        return flaskDelete(`/api/visits/${id}`);
+      delete: async (id, patientMrn) => {
+        const mrn = patientMrn ? `?patient_mrn=${encodeURIComponent(patientMrn)}` : '';
+        return flaskDelete(`/api/visits/${id}${mrn}`);
       },
     },
   },

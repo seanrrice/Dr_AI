@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from collections import Counter
 from typing import Iterable, Optional, Mapping, Any
 import time
+import re
 
 class EmotionVisitLogger:
     """
@@ -142,8 +143,9 @@ class EmotionVisitLogger:
             "model_version": self.model_version,
         }
         
-        # Create visit-specific folder
-        visit_dir = self.runs_dir / f"visit_{visit_id}"
+        # Create visit-specific folder using MRN-scoped naming.
+        safe_patient = re.sub(r"[^A-Za-z0-9_.-]", "_", str(patient_id or "").strip())
+        visit_dir = self.runs_dir / f"visit_{safe_patient}_{visit_id}"
         visit_dir.mkdir(parents=True, exist_ok=True)
         
         # Write to face.jsonl (append mode for JSONL)

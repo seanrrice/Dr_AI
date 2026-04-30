@@ -1007,6 +1007,14 @@ def _patient_runs_dir(patient_mrn):
     return RUNS_DIR / _safe_folder_name(mrn)
 
 
+def _visit_folder_name(visit_id, patient_mrn=None):
+    visit_part = str(visit_id or "").strip()
+    mrn_part = str(patient_mrn or "").strip()
+    if mrn_part:
+        return f"visit_{_safe_folder_name(mrn_part)}_{visit_part}"
+    return f"visit_{visit_part}"
+
+
 def _legacy_visit_dir(visit_id):
     return RUNS_DIR / f"visit_{visit_id}"
 
@@ -1015,17 +1023,19 @@ def _nested_visit_dir(visit_id, patient_mrn):
     patient_dir = _patient_runs_dir(patient_mrn)
     if not patient_dir:
         return None
-    return patient_dir / f"visit_{visit_id}"
+    return patient_dir / _visit_folder_name(visit_id, patient_mrn=patient_mrn)
 
 
 def _iter_nested_visit_dirs(visit_id, patient_mrn=None):
     if not RUNS_DIR.exists():
         return
 
+    visit_id_s = str(visit_id or "").strip()
+
     if patient_mrn:
         patient_dir = _patient_runs_dir(patient_mrn)
         if patient_dir and patient_dir.exists() and patient_dir.is_dir():
-            candidate = patient_dir / f"visit_{visit_id}"
+            candidate = patient_dir / _visit_folder_name(visit_id_s, patient_mrn=patient_mrn)
             if candidate.exists() and candidate.is_dir():
                 yield candidate
         return
@@ -1033,7 +1043,8 @@ def _iter_nested_visit_dirs(visit_id, patient_mrn=None):
     for child in RUNS_DIR.iterdir():
         if not child.is_dir():
             continue
-        candidate = child / f"visit_{visit_id}"
+        mrn_guess = child.name
+        candidate = child / _visit_folder_name(visit_id_s, patient_mrn=mrn_guess)
         if candidate.exists() and candidate.is_dir():
             yield candidate
 
@@ -1041,19 +1052,6 @@ def _iter_nested_visit_dirs(visit_id, patient_mrn=None):
 def _find_existing_visit_dir(visit_id, patient_mrn=None):
     for d in _iter_nested_visit_dirs(visit_id, patient_mrn=patient_mrn):
         return d
-    legacy = _legacy_visit_dir(visit_id)
-    if legacy.exists() and legacy.is_dir():
-        if not patient_mrn:
-            return legacy
-        meta = _read_json_file(legacy / "visit_metadata.json") or {}
-        manifest = _read_manifest_from_dir(legacy) or {}
-        legacy_mrn = (
-            str(meta.get("patient_mrn") or manifest.get("patient_mrn") or "")
-            .strip()
-            .lower()
-        )
-        if legacy_mrn and legacy_mrn == str(patient_mrn).strip().lower():
-            return legacy
     return None
 
 
@@ -1082,9 +1080,12 @@ def _migrate_runs_to_mrn_structure():
     for visit_dir in RUNS_DIR.iterdir():
         if not visit_dir.is_dir() or not visit_dir.name.startswith("visit_"):
             continue
-        visit_id = visit_dir.name[len("visit_"):]
         meta = _read_json_file(visit_dir / "visit_metadata.json") or {}
         manifest = _read_manifest_from_dir(visit_dir) or {}
+        visit_id = str(meta.get("id") or manifest.get("visit_id") or "").strip()
+        if not visit_id:
+            # Backward compatible parsing for legacy folder names like visit_2
+            visit_id = visit_dir.name[len("visit_"):]
         patient_mrn = meta.get("patient_mrn") or manifest.get("patient_mrn")
         if not patient_mrn:
             continue
@@ -1103,6 +1104,33 @@ def _migrate_runs_to_mrn_structure():
         else:
             shutil.move(str(visit_dir), str(target_dir))
         moves.append((str(visit_dir), str(target_dir)))
+
+    # Rename nested patient folders from legacy "visit_<id>" to
+    # canonical "visit_<mrn>_<id>".
+    for patient_dir in RUNS_DIR.iterdir():
+        if not patient_dir.is_dir() or patient_dir.name.startswith("visit_"):
+            continue
+        patient_mrn = patient_dir.name
+        for visit_dir in patient_dir.iterdir():
+            if not visit_dir.is_dir() or not visit_dir.name.startswith("visit_"):
+                continue
+            meta = _read_json_file(visit_dir / "visit_metadata.json") or {}
+            manifest = _read_manifest_from_dir(visit_dir) or {}
+            visit_id = str(meta.get("id") or manifest.get("visit_id") or "").strip()
+            if not visit_id:
+                continue
+            canonical = patient_dir / _visit_folder_name(visit_id, patient_mrn=patient_mrn)
+            if visit_dir == canonical:
+                continue
+            if canonical.exists():
+                for f in visit_dir.iterdir():
+                    dest = canonical / f.name
+                    if not dest.exists():
+                        shutil.move(str(f), str(dest))
+                shutil.rmtree(visit_dir, ignore_errors=True)
+            else:
+                shutil.move(str(visit_dir), str(canonical))
+            moves.append((str(visit_dir), str(canonical)))
     return moves
 
 @app.route('/api/visits/<visit_id>/create', methods=['POST'])
@@ -1131,12 +1159,6 @@ def create_visit_folder(visit_id):
 @app.route('/api/visits/<visit_id>/logs/audio', methods=['POST'])
 def save_audio_log(visit_id):
     data = request.get_json(silent=True) or {}
-    visit_dir = _resolve_visit_dir(
-        visit_id,
-        patient_mrn=data.get("patient_mrn"),
-        create=True,
-    )
-    audio_path = visit_dir / "audio.jsonl"
 
     # Accept both JSONL (x-ndjson) and JSON array formats
     content_type = request.content_type or ""
@@ -1161,6 +1183,19 @@ def save_audio_log(visit_id):
         except Exception:
             pass
 
+    patient_mrn = data.get("patient_mrn")
+    if not patient_mrn and records:
+        patient_mrn = records[0].get("patient_mrn")
+    if not patient_mrn:
+        patient_mrn = request.args.get("patient_mrn")
+
+    visit_dir = _resolve_visit_dir(
+        visit_id,
+        patient_mrn=patient_mrn,
+        create=True,
+    )
+    audio_path = visit_dir / "audio.jsonl"
+
     with open(audio_path, "w", encoding="utf-8") as f:
         for record in records:
             f.write(json.dumps(record) + "\n")
@@ -1183,12 +1218,6 @@ def save_audio_log(visit_id):
 @app.route('/api/visits/<visit_id>/logs/gait', methods=['POST'])
 def save_gait_log(visit_id):
     data = request.get_json(silent=True) or {}
-    visit_dir = _resolve_visit_dir(
-        visit_id,
-        patient_mrn=data.get("patient_mrn"),
-        create=True,
-    )
-    gait_path = visit_dir / "gait.jsonl"
 
     content_type = request.content_type or ""
     raw = request.get_data(as_text=True)
@@ -1215,6 +1244,19 @@ def save_gait_log(visit_id):
         except Exception:
             pass
 
+    patient_mrn = data.get("patient_mrn")
+    if not patient_mrn and records:
+        patient_mrn = records[0].get("patient_mrn")
+    if not patient_mrn:
+        patient_mrn = request.args.get("patient_mrn")
+
+    visit_dir = _resolve_visit_dir(
+        visit_id,
+        patient_mrn=patient_mrn,
+        create=True,
+    )
+    gait_path = visit_dir / "gait.jsonl"
+
     with open(gait_path, "w", encoding="utf-8") as f:
         for record in records:
             f.write(json.dumps(record) + "\n")
@@ -1240,16 +1282,10 @@ def rename_visit_folder():
     old_id = data.get("from")
     new_id = data.get("to")
     patient_mrn = data.get("patient_mrn")
-    if not patient_mrn:
-        old_meta = _read_visit_metadata(old_id) or {}
-        old_manifest = _read_manifest_from_dir(_resolve_visit_dir(old_id, create=False)) or {}
-        patient_mrn = (
-            old_meta.get("patient_mrn")
-            or old_manifest.get("patient_mrn")
-            or None
-        )
     if not old_id or not new_id:
         return jsonify({"error": "missing from/to"}), 400
+    if not patient_mrn:
+        return jsonify({"error": "patient_mrn is required"}), 400
     old_dir = _resolve_visit_dir(old_id, patient_mrn=patient_mrn, create=False)
     new_dir = _resolve_visit_dir(new_id, patient_mrn=patient_mrn, create=True)
     try:
@@ -1458,7 +1494,8 @@ def _canonical_gait_section_from_records(records):
 
 @app.route('/api/visits/<visit_id>/report', methods=['GET'])
 def get_report(visit_id):
-    visit_dir = _resolve_visit_dir(visit_id, create=False)
+    patient_mrn = request.args.get("patient_mrn")
+    visit_dir = _resolve_visit_dir(visit_id, patient_mrn=patient_mrn, create=False)
     report_path = visit_dir / "report.json"
     if report_path.exists():
         with open(report_path, "r", encoding="utf-8") as f:
@@ -1503,7 +1540,8 @@ def get_report(visit_id):
 
 @app.route('/api/visits/<visit_id>/status', methods=['GET'])
 def get_visit_status(visit_id):
-    visit_dir = _resolve_visit_dir(visit_id, create=False)
+    patient_mrn = request.args.get("patient_mrn")
+    visit_dir = _resolve_visit_dir(visit_id, patient_mrn=patient_mrn, create=False)
     manifest_path = visit_dir / "manifest.json"
     if manifest_path.exists():
         with open(manifest_path, "r", encoding="utf-8") as f:
@@ -1520,7 +1558,9 @@ def integrate_visit(visit_id):
     or manually triggered from VisitDetails.
     """
     import sys
-    visit_dir = _resolve_visit_dir(visit_id, create=False)
+    data = request.get_json(silent=True) or {}
+    patient_mrn = data.get("patient_mrn") or request.args.get("patient_mrn")
+    visit_dir = _resolve_visit_dir(visit_id, patient_mrn=patient_mrn, create=False)
     if not visit_dir.exists():
         return jsonify({"error": "Visit folder not found"}), 404
 
@@ -1720,12 +1760,12 @@ def _write_visit_metadata(visit_id, data):
     )
     path = visit_dir / "visit_metadata.json"
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    _write_visit_transcription(visit_id, data.get("transcription"))
+    _write_visit_transcription(visit_id, data.get("transcription"), patient_mrn=data.get("patient_mrn"))
 
 
-def _write_visit_transcription(visit_id, transcription):
-    existing = _resolve_visit_dir(visit_id, create=False)
-    visit_dir = existing if existing.exists() else _resolve_visit_dir(visit_id, create=True)
+def _write_visit_transcription(visit_id, transcription, patient_mrn=None):
+    existing = _resolve_visit_dir(visit_id, patient_mrn=patient_mrn, create=False)
+    visit_dir = existing if existing.exists() else _resolve_visit_dir(visit_id, patient_mrn=patient_mrn, create=True)
     tx_path = visit_dir / "transcription.txt"
     text = "" if transcription is None else str(transcription)
     tx_path.write_text(text, encoding="utf-8")
@@ -1967,7 +2007,10 @@ def create_visit():
 
 @app.route('/api/visits/<visit_id>', methods=['GET'])
 def get_visit(visit_id):
-    meta = _read_visit_metadata(visit_id)
+    patient_mrn = request.args.get("patient_mrn")
+    if not patient_mrn:
+        return jsonify({"error": "patient_mrn is required"}), 400
+    meta = _read_visit_metadata(visit_id, patient_mrn=patient_mrn)
     if not meta:
         return jsonify({"error": "Visit not found"}), 404
     return jsonify(meta)
@@ -1976,7 +2019,10 @@ def get_visit(visit_id):
 @app.route('/api/visits/<visit_id>', methods=['PATCH'])
 def update_visit(visit_id):
     data = request.get_json(silent=True) or {}
-    meta = _read_visit_metadata(visit_id)
+    patient_mrn = data.get("patient_mrn") or request.args.get("patient_mrn")
+    if not patient_mrn:
+        return jsonify({"error": "patient_mrn is required"}), 400
+    meta = _read_visit_metadata(visit_id, patient_mrn=patient_mrn)
     if not meta:
         return jsonify({"error": "Visit not found"}), 404
     meta = {
@@ -1990,7 +2036,10 @@ def update_visit(visit_id):
 
 @app.route('/api/visits/<visit_id>', methods=['DELETE'])
 def delete_visit(visit_id):
-    meta = _read_visit_metadata(visit_id)
+    patient_mrn = request.args.get("patient_mrn")
+    if not patient_mrn:
+        return jsonify({"error": "patient_mrn is required"}), 400
+    meta = _read_visit_metadata(visit_id, patient_mrn=patient_mrn)
     if not meta:
         return jsonify({"error": "Visit not found"}), 404
     visit_dir = _resolve_visit_dir(

@@ -261,7 +261,12 @@ export default function ReportSummary() {
   const { data: liveReport } = useQuery({
     queryKey: ["visit-live-report", visitIdParam],
     queryFn: async () => {
-      const res = await fetch(`http://localhost:5000/api/visits/${encodeURIComponent(visitIdParam)}/report`);
+      const query = new URLSearchParams();
+      if (patientMrnParam) query.set("patient_mrn", patientMrnParam);
+      const qs = query.toString();
+      const res = await fetch(
+        `http://localhost:5000/api/visits/${encodeURIComponent(visitIdParam)}/report${qs ? `?${qs}` : ""}`
+      );
       if (!res.ok) return null;
       return res.json();
     },
@@ -316,7 +321,6 @@ export default function ReportSummary() {
   const [showAudioRaw, setShowAudioRaw] = useState(false);
   const [showGaitRaw, setShowGaitRaw] = useState(false);
   const [reportTab, setReportTab] = useState("multimodal");
-  const [keywordView, setKeywordView] = useState("diagnostic");
 
   const patientMrnForTrends = isPreviousReportVisual
     ? (loadedVisit?.patient_mrn ?? seededVisit?.patient_mrn ?? reportPkg.face?.[0]?.patient_mrn ?? "")
@@ -565,6 +569,18 @@ export default function ReportSummary() {
       });
       (w.features?.diagnostic_terms?.matches || []).forEach(([word]) => diagSet.add(word));
     });
+    // Align with serial trends keyword logic: if explicit diagnostic matches are
+    // absent for this payload shape, treat window top_words as diagnostic terms.
+    if (diagSet.size === 0) {
+      windows.forEach((w) => {
+        (w.features?.top_words || []).forEach(([word]) => {
+          if (word) diagSet.add(word);
+        });
+      });
+      (summary?.features?.top_words || []).forEach(([word]) => {
+        if (word) diagSet.add(word);
+      });
+    }
 
     const topicMap = {};
     windows.forEach((w) => {
@@ -1266,44 +1282,15 @@ export default function ReportSummary() {
                   <Card className="border-teal-200 bg-white/80 backdrop-blur">
                     <CardHeader className="pb-2">
                       <CardTitle className="text-xs font-mono uppercase tracking-wider text-teal-600">
-                        Top keywords (all windows)
+                        Top diagnostic keywords
                       </CardTitle>
                     </CardHeader>
                     <CardContent>
-                      <div className="flex items-center gap-2 mb-3 border-b border-teal-100 pb-2">
-                        <button
-                          type="button"
-                          onClick={() => setKeywordView("diagnostic")}
-                          className={cn(
-                            "text-xs px-2.5 py-1 rounded border transition-colors",
-                            keywordView === "diagnostic"
-                              ? "bg-amber-100 text-amber-900 border-amber-200"
-                              : "bg-white text-teal-700 border-teal-200 hover:bg-teal-50"
-                          )}
-                        >
-                          Diagnostic terms
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setKeywordView("all")}
-                          className={cn(
-                            "text-xs px-2.5 py-1 rounded border transition-colors",
-                            keywordView === "all"
-                              ? "bg-teal-100 text-teal-900 border-teal-200"
-                              : "bg-white text-teal-700 border-teal-200 hover:bg-teal-50"
-                          )}
-                        >
-                          Include non-diagnostic
-                        </button>
-                      </div>
                       <table className="w-full text-sm">
                         <thead>
                           <tr className="border-b border-teal-200">
                             <th className="text-left py-2 text-[0.65rem] font-mono uppercase tracking-wider text-teal-600">
                               Word
-                            </th>
-                            <th className="text-left py-2 text-[0.65rem] font-mono uppercase tracking-wider text-teal-600">
-                              Diagnostic
                             </th>
                             <th className="text-right py-2 text-[0.65rem] font-mono uppercase tracking-wider text-teal-600">
                               Count
@@ -1311,28 +1298,19 @@ export default function ReportSummary() {
                           </tr>
                         </thead>
                         <tbody>
-                          {(keywordView === "diagnostic"
-                            ? audioDerived.kwSorted.filter(([word]) => audioDerived.diagSet.has(word))
-                            : audioDerived.kwSorted
-                          ).map(([word, count]) => (
+                          {audioDerived.kwSorted
+                            .filter(([word]) => audioDerived.diagSet.has(word))
+                            .map(([word, count]) => (
                             <tr key={word} className="border-b border-teal-100">
                               <td className="py-1.5 text-teal-900">{word}</td>
-                              <td className="py-1.5">
-                                {audioDerived.diagSet.has(word) ? (
-                                  <span className="inline-block rounded bg-amber-100 text-amber-800 px-1.5 py-0.5 text-[0.65rem] font-mono font-semibold">
-                                    diagnostic
-                                  </span>
-                                ) : null}
-                              </td>
                               <td className="py-1.5 text-right font-mono font-semibold text-teal-800">
                                 {count}
                               </td>
                             </tr>
                           ))}
-                          {keywordView === "diagnostic" &&
-                            audioDerived.kwSorted.filter(([word]) => audioDerived.diagSet.has(word)).length === 0 && (
+                          {audioDerived.kwSorted.filter(([word]) => audioDerived.diagSet.has(word)).length === 0 && (
                               <tr>
-                                <td colSpan={3} className="py-3 text-center text-xs text-teal-600">
+                                <td colSpan={2} className="py-3 text-center text-xs text-teal-600">
                                   No diagnostic terms detected in this sample window set.
                                 </td>
                               </tr>

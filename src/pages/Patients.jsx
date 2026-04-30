@@ -60,7 +60,7 @@ export default function Patients() {
       // delete all visits associated with this patient
       const patientVisits = visits.filter(v => v.patient_mrn === patientMrn);
       await Promise.all(
-        patientVisits.map(visit => api.entities.Visit.delete(visit.id))
+        patientVisits.map(visit => api.entities.Visit.delete(visit.id, patientMrn))
       );
       // delete the patient
       return api.entities.Patient.delete(patientMrn);

@@ -21,6 +21,7 @@ from pathlib import Path
 import statistics
 import json
 import os
+import re
 
 import sys
 
@@ -30,6 +31,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from common_utils.orchestrator_utils import update_manifest_status  
 from emotion_pipeline.emotion_logger_spec_v01 import EmotionVisitLogger
+def _safe_visit_part(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", str(value or "").strip())
+
+
 # ==========================
 # CONFIG
 # ==========================
@@ -172,7 +177,8 @@ def run_face_analysis(
     show_window: bool = False,
 ):
     runs_dir = Path(runs_dir)
-    visit_dir = runs_dir / f"visit_{visit_id}"
+    mrn_part = _safe_visit_part(patient_id)
+    visit_dir = runs_dir / f"visit_{mrn_part}_{visit_id}"
     visit_dir.mkdir(parents=True, exist_ok=True)
 
     if visit_label is None:

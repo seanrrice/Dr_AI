@@ -13,7 +13,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { ArrowLeft, FileText, Brain, Loader2, UserPlus, CheckCircle, XCircle, Clock, Activity, Mic, MicOff } from "lucide-react";
 import { compareAllModels, getConsensusResult, analyzeKeywords, analyzeSentiment, analyzeSemantics, extractPatientText } from "@/services/aiService";
 import { transcriptionService } from "@/services/transcriptionService";
-import { AudioJsonlLogger, makeRelativeTimer, parsePatientSegments } from "@/utils/jsonlLogger";
+import { AudioJsonlLogger, parsePatientSegments } from "@/utils/jsonlLogger";
 
 const FLASK_URL = "http://localhost:5000"; //for facial analysis
 
@@ -119,6 +119,25 @@ function shouldReplaceTranscriptLine(existingLine, incomingLine) {
   return bContainsA || (samePrefix && bText.length > aText.length);
 }
 
+function shouldReplacePlainFragment(existingLine, incomingLine) {
+  const a = parseTranscriptLine(existingLine);
+  const b = parseTranscriptLine(incomingLine);
+  const aIsTimestamped = a.startSeconds != null && !!a.speaker;
+  const bIsTimestamped = b.startSeconds != null && !!b.speaker;
+  if (aIsTimestamped || bIsTimestamped) return false;
+
+  const aText = a.normalized;
+  const bText = b.normalized;
+  if (!aText || !bText || aText === bText) return false;
+
+  const bContainsA = bText.includes(aText);
+  const samePrefix =
+    aText.startsWith(bText.slice(0, Math.min(12, bText.length))) ||
+    bText.startsWith(aText.slice(0, Math.min(12, aText.length)));
+
+  return bContainsA || (samePrefix && bText.length > aText.length);
+}
+
 function mergeTranscriptLine(lines, incomingLine) {
   const next = Array.isArray(lines) ? [...lines] : [];
   const incomingDisplay = String(incomingLine || "").trim();
@@ -143,6 +162,10 @@ function mergeTranscriptLine(lines, incomingLine) {
 
   for (let i = next.length - 1; i >= 0; i -= 1) {
     const existing = next[i];
+    if (shouldReplacePlainFragment(existing, incomingDisplay)) {
+      next[i] = incomingDisplay;
+      return next;
+    }
     if (shouldReplaceTranscriptLine(existing, incomingDisplay)) {
       next[i] = incomingDisplay;
       return next;
@@ -187,7 +210,6 @@ export default function NewVisit() {
   const interimTranscriptRef = useRef("");
   const seenTranscriptLinesRef = useRef(new Set());
   const jsonlLoggerRef = useRef(null);    // ✅ JSONL logger instance
-  const windowStartRef = useRef(null);   // ✅ tracks each window's start time
   const [analysisProgress, setAnalysisProgress] = useState({
     openai: 'pending',
     ollama: 'pending'
@@ -785,7 +807,18 @@ const handleStopFace = async () => {
             }
           }
           // Prefer timestamped lines over plain fragments in the same update.
-          candidateLines.push(...timestampedLines, ...(timestampedLines.length ? [] : plainLines));
+          // If we only have plain fragments, compound them first so incremental
+          // partials become one evolving line instead of stacking duplicates.
+          if (timestampedLines.length > 0) {
+            candidateLines.push(...timestampedLines);
+          } else {
+            let compoundedPlain = [];
+            for (const line of plainLines) {
+              const displayLine = formatTranscriptionForDisplay(line, useSpeakerLabels);
+              compoundedPlain = mergeTranscriptLine(compoundedPlain, displayLine);
+            }
+            candidateLines.push(...compoundedPlain);
+          }
 
           const appended = [];
           for (const rawLine of candidateLines) {
@@ -806,20 +839,6 @@ const handleStopFace = async () => {
               transcription: committedTranscriptRef.current
             }));
           }
-          if (jsonlLoggerRef.current && data.text) {
-            const logger = jsonlLoggerRef.current;
-            const now = Date.now();
-            const toRel = makeRelativeTimer(logger.t0);
-            const tStart = toRel(windowStartRef.current);
-            const tEnd = toRel(now);
-            windowStartRef.current = now;
-            const patientText = extractPatientText(data.text) || data.text;
-            const keywordAnalysis = analyzeKeywords(patientText);
-            const sentimentAnalysis = await analyzeSentiment(patientText);
-            const semanticAnalysis = analyzeSemantics(patientText);
-            logger.logWindow({ tStart, tEnd, wordCount: data.text.trim().split(/\s+/).length, keywordAnalysis, sentimentAnalysis, semanticAnalysis });
-          }
-
         } else if (event === 'complete') {
           const displayFull = formatTranscriptionForDisplay(data.full_text || "", useSpeakerLabels);
           setVisitData(prev => {
@@ -921,6 +940,8 @@ const handleStopFace = async () => {
       try {
         await fetch(`http://localhost:5000/api/visits/${visit.id}/integrate`, {
           method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ patient_mrn: selectedPatientMrn }),
         });
         console.log('[Integration] report.json generated automatically');
       } catch (err) {
@@ -957,16 +978,6 @@ const handleStopFace = async () => {
         deviceIndex: selectedAudioDevice === "default" ? null : Number(selectedAudioDevice),
         channels: Number(channelMode)
       });
-
-      // Initialize the JSONL logger for this recording session
-      const t0 = Date.now();
-      const workingVisitId = ensureWorkingVisitId();
-      jsonlLoggerRef.current = new AudioJsonlLogger({
-        visitId: workingVisitId || `session_${t0}`,
-        patientId: selectedPatientMrn || 'unknown',
-        t0,
-      });
-      windowStartRef.current = t0;
 
       setIsTranscribing(true);
     } catch (error) {
@@ -1018,7 +1029,8 @@ const handleStopFace = async () => {
     manifestPollRef.current = setInterval(async () => {
       if (!activeVisitIdRef.current) return;
       try {
-        const r = await fetch(`http://localhost:5000/api/visits/${activeVisitIdRef.current}/status`);
+        const mrnQ = selectedPatientMrn ? `?patient_mrn=${encodeURIComponent(selectedPatientMrn)}` : "";
+        const r = await fetch(`http://localhost:5000/api/visits/${activeVisitIdRef.current}/status${mrnQ}`);
         if (r.ok) {
           const data = await r.json();
           if (data.status) {
@@ -1064,7 +1076,8 @@ const handleStopFace = async () => {
 
       const loadLiveMultimodal = async (visitFolderId) => {
         try {
-          const res = await fetch(`http://localhost:5000/api/visits/${visitFolderId}/report`);
+          const mrnQ = selectedPatientMrn ? `?patient_mrn=${encodeURIComponent(selectedPatientMrn)}` : "";
+          const res = await fetch(`http://localhost:5000/api/visits/${visitFolderId}/report${mrnQ}`);
           if (!res.ok) return { face: [], audio: [], gait: [] };
           const report = await res.json();
           const sections = report?.sections || {};
@@ -1123,23 +1136,21 @@ const handleStopFace = async () => {
         }
         jsonlLoggerRef.current = null;
       }*/
-      // Build audio JSONL window(s) from transcription text.
-      // If explicit timestamped patient segments exist, they take priority.
+      // Build audio JSONL strictly from finalized transcription text.
+      // One timestamped patient segment => one audio window.
       if (visitData.transcription) {
+        const t0 = Date.now();
+        jsonlLoggerRef.current = new AudioJsonlLogger({
+          visitId: workingVisitId,
+          patientId: selectedPatientMrn,
+          t0,
+        });
+
         const segments = parsePatientSegments(visitData.transcription).filter(
           (seg) => typeof seg.text === "string" && seg.text.trim().length > 0
         );
 
         if (segments.length > 0) {
-          // Rebuild logger from structured transcript to ensure one JSONL window
-          // per timestamped patient segment (even if coarse live windows exist).
-          const t0 = Date.now();
-          jsonlLoggerRef.current = new AudioJsonlLogger({
-            visitId: workingVisitId,
-            patientId: selectedPatientMrn,
-            t0,
-          });
-
           for (const seg of segments) {
             const text = seg.text.trim();
             const keywordAnalysis = analyzeKeywords(text);
@@ -1156,30 +1167,19 @@ const handleStopFace = async () => {
             });
           }
         } else {
-          if (!jsonlLoggerRef.current) {
-            const t0 = Date.now();
-            jsonlLoggerRef.current = new AudioJsonlLogger({
-              visitId: workingVisitId,
-              patientId: selectedPatientMrn,
-              t0,
-            });
-          }
+          const patientText = extractPatientText(visitData.transcription) || visitData.transcription;
+          const keywordAnalysis = analyzeKeywords(patientText);
+          const sentimentAnalysis = await analyzeSentiment(patientText);
+          const semanticAnalysis = analyzeSemantics(patientText);
 
-          if (jsonlLoggerRef.current.recordCount === 0) {
-            const patientText = extractPatientText(visitData.transcription) || visitData.transcription;
-            const keywordAnalysis = analyzeKeywords(patientText);
-            const sentimentAnalysis = await analyzeSentiment(patientText);
-            const semanticAnalysis = analyzeSemantics(patientText);
-
-            jsonlLoggerRef.current.logWindow({
-              tStart: 0,
-              tEnd: parseFloat((visitData.transcription.trim().split(/\s+/).length / 2.5).toFixed(3)),
-              wordCount: patientText.trim().split(/\s+/).length,
-              keywordAnalysis,
-              sentimentAnalysis,
-              semanticAnalysis,
-            });
-          }
+          jsonlLoggerRef.current.logWindow({
+            tStart: 0,
+            tEnd: parseFloat((visitData.transcription.trim().split(/\s+/).length / 2.5).toFixed(3)),
+            wordCount: patientText.trim().split(/\s+/).length,
+            keywordAnalysis,
+            sentimentAnalysis,
+            semanticAnalysis,
+          });
         }
       }
 

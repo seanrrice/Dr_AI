@@ -387,7 +387,10 @@ export class AudioJsonlLogger {
    *   Content-Type: application/x-ndjson
    */
   async flush(backendUrl) {
-    const url = `${backendUrl}/api/visits/${this.visitId}/logs/audio`;
+    const query = new URLSearchParams();
+    if (this.patientId) query.set('patient_mrn', this.patientId);
+    const qs = query.toString() ? `?${query.toString()}` : '';
+    const url = `${backendUrl}/api/visits/${this.visitId}/logs/audio${qs}`;
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-ndjson' },

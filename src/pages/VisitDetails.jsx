@@ -13,7 +13,7 @@ import { generateVisitPDF } from "@/utils/pdfGenerator";
 const FLASK_URL = "http://localhost:5000";
 
 // ── Subsystem Report Section ──────────────────────────────────────────────────
-function SubsystemReport({ visitId }) {
+function SubsystemReport({ visitId, patientMrn }) {
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("audio");
@@ -21,11 +21,18 @@ function SubsystemReport({ visitId }) {
 
   const fetchReport = React.useCallback(async (triggerIntegrate = false) => {
     if (!visitId) return;
+    const query = new URLSearchParams();
+    if (patientMrn) query.set("patient_mrn", patientMrn);
+    const qs = query.toString() ? `?${query.toString()}` : "";
     try {
       if (triggerIntegrate) {
-        await fetch(`${FLASK_URL}/api/visits/${visitId}/integrate`, { method: 'POST' });
+        await fetch(`${FLASK_URL}/api/visits/${visitId}/integrate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ patient_mrn: patientMrn }),
+        });
       }
-      const r = await fetch(`${FLASK_URL}/api/visits/${visitId}/report`);
+      const r = await fetch(`${FLASK_URL}/api/visits/${visitId}/report${qs}`);
       const data = await r.json();
       setReport(data);
       setLoading(false);
@@ -34,7 +41,7 @@ function SubsystemReport({ visitId }) {
       setLoading(false);
       return null;
     }
-  }, [visitId]);
+  }, [visitId, patientMrn]);
 
   useEffect(() => {
     if (!visitId) return;
@@ -48,7 +55,10 @@ function SubsystemReport({ visitId }) {
 
     pollRef.current = setInterval(async () => {
       try {
-        const r = await fetch(`${FLASK_URL}/api/visits/${visitId}/status`);
+        const query = new URLSearchParams();
+        if (patientMrn) query.set("patient_mrn", patientMrn);
+        const qs = query.toString() ? `?${query.toString()}` : "";
+        const r = await fetch(`${FLASK_URL}/api/visits/${visitId}/status${qs}`);
         if (!r.ok) return;
         const manifest = await r.json();
         const faceStatus = manifest?.status?.face;
@@ -70,7 +80,7 @@ function SubsystemReport({ visitId }) {
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, [visitId, fetchReport]);
+  }, [visitId, patientMrn, fetchReport]);
 
   if (loading) {
     return (
@@ -446,7 +456,10 @@ export default function VisitDetails() {
   const handleExportPDF = async () => {
     if (!(visit && patient)) return;
     try {
-      const r = await fetch(`${FLASK_URL}/api/visits/${visit.id}/report`);
+      const query = new URLSearchParams();
+      if (visit?.patient_mrn) query.set("patient_mrn", visit.patient_mrn);
+      const qs = query.toString() ? `?${query.toString()}` : "";
+      const r = await fetch(`${FLASK_URL}/api/visits/${visit.id}/report${qs}`);
       const report = r.ok ? await r.json() : null;
       generateVisitPDF(visit, patient, report);
     } catch {
@@ -487,7 +500,7 @@ export default function VisitDetails() {
               size="icon"
               onClick={() =>
                 fromReport && visitId
-                  ? navigate(createPageUrl(`ReportSummary?visitId=${visitId}`))
+                  ? navigate(createPageUrl(`ReportSummary?visitId=${visitId}&patientMrn=${encodeURIComponent(visit?.patient_mrn || "")}`))
                   : navigate(createPageUrl("Dashboard"))
               }
             >
@@ -896,7 +909,7 @@ export default function VisitDetails() {
         )}
 
         {/* ── MULTIMODAL SUBSYSTEM REPORT (NEW) ── */}
-        <SubsystemReport visitId={visitId} />
+        <SubsystemReport visitId={visitId} patientMrn={visit?.patient_mrn || ""} />
 
         {/* Physician Notes */}
         {visit.physician_notes && (
