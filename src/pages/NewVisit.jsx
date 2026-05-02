@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
 import { api } from "@/api/apiClient";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
@@ -205,6 +205,7 @@ export default function NewVisit() {
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [transcriptionError, setTranscriptionError] = useState(null);
   const transcriptionListenerRef = useRef(null);
+  const transcriptionTextareaRef = useRef(null);
   const committedTranscriptRef = useRef("");
   const committedTranscriptLinesRef = useRef([]);
   const interimTranscriptRef = useRef("");
@@ -873,6 +874,13 @@ const handleStopFace = async () => {
       }
     };
   }, [isTranscribing, channelMode]);
+
+  useLayoutEffect(() => {
+    if (!isTranscribing) return;
+    const el = transcriptionTextareaRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [visitData.transcription, isTranscribing]);
 
   useEffect(() => {
     if (!isTranscribing || transcriptionReady) return;
@@ -1756,11 +1764,12 @@ const handleStopFace = async () => {
                 </div>
               )}
               <Textarea
+                ref={transcriptionTextareaRef}
                 id="transcription"
                 placeholder="Type patient's spoken words here or use the microphone button to record..."
                 value={visitData.transcription}
                 onChange={(e) => setVisitData({...visitData, transcription: e.target.value})}
-                className="min-h-[180px] font-mono text-sm"
+                className="min-h-[180px] max-h-72 overflow-y-auto font-mono text-sm"
               />
               <p className="text-xs text-teal-600">
                 Optional: real-time transcription with speaker detection and timestamps

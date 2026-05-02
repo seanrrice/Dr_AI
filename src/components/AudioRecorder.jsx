@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect } from 'react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Mic, MicOff, Loader2, Users } from 'lucide-react';
@@ -17,6 +17,13 @@ export default function AudioRecorder({ onTranscriptionUpdate, onSpeakerSegments
 
   const socketRef = useRef(null);
   const fullTranscriptRef = useRef('');
+  const transcriptScrollRef = useRef(null);
+
+  useLayoutEffect(() => {
+    const el = transcriptScrollRef.current;
+    if (!el || !isRecording) return;
+    el.scrollTop = el.scrollHeight;
+  }, [currentTranscript, isRecording]);
 
   useEffect(() => {
     // Connect to Python backend
@@ -186,7 +193,10 @@ export default function AudioRecorder({ onTranscriptionUpdate, onSpeakerSegments
 
           {/* Real-time Transcript Display */}
           {isRecording && (
-            <div className="bg-white rounded-lg p-4 border border-blue-200 max-h-60 overflow-y-auto">
+            <div
+              ref={transcriptScrollRef}
+              className="bg-white rounded-lg p-4 border border-blue-200 max-h-60 overflow-y-auto"
+            >
               <div className="text-sm text-slate-700 font-mono whitespace-pre-wrap leading-relaxed">
                 {currentTranscript || 'Listening... speak now!'}
               </div>
