@@ -447,32 +447,6 @@ export default function ReportSerialTrends() {
     [labels, snaps]
   );
 
-  const audioChart = useMemo(
-    () => ({
-      labels,
-      datasets: [
-        {
-          label: "Sentiment score",
-          data: snaps.map((s) => s.sentiment_score),
-          borderColor: "#92400e",
-          backgroundColor: "rgba(146,64,14,0.1)",
-          yAxisID: "ySent",
-          tension: 0.25,
-        },
-        {
-          label: "Diagnostic term %",
-          data: snaps.map((s) =>
-            s.audio_diagnostic_term_pct != null ? s.audio_diagnostic_term_pct * 100 : null
-          ),
-          borderColor: "#7c3aed",
-          backgroundColor: "rgba(124,58,237,0.08)",
-          yAxisID: "yPct",
-          tension: 0.25,
-        },
-      ],
-    }),
-    [labels, snaps]
-  );
 
   const gaitChart = useMemo(
     () => ({
@@ -509,34 +483,6 @@ export default function ReportSerialTrends() {
     [labels, snaps]
   );
 
-  const twoAxisSentimentOptions = useMemo(
-    () => ({
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: { legend: { labels: { font: { size: 10 } } } },
-      scales: {
-        x: { ticks: { font: { size: 10 } } },
-        ySent: {
-          type: "linear",
-          position: "left",
-          min: -1,
-          max: 1,
-          ticks: { font: { size: 10 } },
-          title: { display: true, text: "-1 to 1", font: { size: 10 } },
-        },
-        yPct: {
-          type: "linear",
-          position: "right",
-          min: 0,
-          max: 100,
-          ticks: { callback: (v) => `${v}%`, font: { size: 10 } },
-          title: { display: true, text: "%", font: { size: 10 } },
-          grid: { drawOnChartArea: false },
-        },
-      },
-    }),
-    []
-  );
 
   const gaitOptions = useMemo(
     () => ({
@@ -676,18 +622,6 @@ export default function ReportSerialTrends() {
             </div>
           </CardContent>
         </Card>
-
-        {storedVisitsForNlp.length > 0 && (
-          <section className="mb-6 space-y-4">
-            <div>
-              <h2 className="text-lg font-semibold text-teal-900">Transcription &amp; NLP trends</h2>
-              <p className="text-sm text-teal-600">
-                Derived from stored visit records for this patient (keyword and sentiment fields).
-              </p>
-            </div>
-            <PatientNlpTrendCharts visits={storedVisitsForNlp} />
-          </section>
-        )}
 
         <div className="mb-4">
           <h2 className="text-lg font-semibold text-teal-900">Vitals trends across visits</h2>
@@ -866,13 +800,11 @@ export default function ReportSerialTrends() {
                 Audio subsystem
               </CardTitle>
               <p className="text-sm text-teal-600 font-normal mt-1">
-                Sentiment score and diagnostic language density over visits
+                Keyword, sentiment, and distress trends across stored visits
               </p>
             </CardHeader>
             <CardContent className="px-4 sm:px-6 pb-6 pt-4">
-              <div className="relative h-[min(420px,50vh)] min-h-[300px] w-full">
-                <Chart type="line" data={audioChart} options={twoAxisSentimentOptions} />
-              </div>
+              <PatientNlpTrendCharts visits={storedVisitsForNlp} />
             </CardContent>
           </Card>
 

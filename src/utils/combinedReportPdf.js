@@ -3,6 +3,13 @@ import { format } from "date-fns";
 
 const MAX_PAGES = 3;
 
+/** Vertical rhythm (mm) — keep gaps between section bars and blocks consistent */
+const PDF_GAP_BEFORE_SECTION_BAR = 4;
+const PDF_GAP_AFTER_SECTION_BAR = 10;
+const PDF_GAP_AFTER_CONTENT_BOX = 2.5;
+/** Breathing room under “Audio & transcription / NLP” before sentiment / charts */
+const PDF_GAP_UNDER_AUDIO_SECTION = 3.5;
+
 /** Five-class face model: Happy, Angry, Neutral, Sad, Surprise */
 const EMO_COLORS = {
   happy: "#f4a261",
@@ -54,6 +61,136 @@ function truncate(s, max) {
   const t = String(s || "").trim();
   if (t.length <= max) return t;
   return `${t.slice(0, max - 1)}…`;
+}
+
+function fmtMax2(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return String(v ?? "—");
+  return n.toFixed(2).replace(/\.?0+$/, "");
+}
+
+function serialGaitSpeedValue(visitRow) {
+  const direct = Number(visitRow?.gait_avg_speed_mps);
+  if (Number.isFinite(direct)) return direct;
+  const gs = visitRow?.gait_summary;
+  const candidates = [
+    gs?.mean_speed_mps,
+    gs?.avg_speed_mps,
+    gs?.features?.avg_speed_mps,
+    gs?.features?.speed_mps,
+  ];
+  for (const c of candidates) {
+    const n = Number(c);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
+function serialFacePctValue(visitRow, emotionKey) {
+  const direct = Number(visitRow?.[`face_${emotionKey}_pct`]);
+  if (Number.isFinite(direct)) return direct <= 1 ? direct * 100 : direct;
+  const faceRows = Array.isArray(visitRow?.multimodal_jsonl?.face) ? visitRow.multimodal_jsonl.face : [];
+  const summary = faceRows.find((r) => r?.type === "summary");
+  const fromSummary = Number(summary?.features?.emotion_pct?.[emotionKey]);
+  if (Number.isFinite(fromSummary)) return fromSummary <= 1 ? fromSummary * 100 : fromSummary;
+  return null;
+}
+
+function serialDistressLevel(visitRow) {
+  const v = String(visitRow?.sentiment_analysis?.distress_level ?? visitRow?.distress_level ?? "").toLowerCase();
+  if (v === "high") return 3;
+  if (v === "medium") return 2;
+  if (v === "low") return 1;
+  return null;
+}
+
+function serialKeywordCount(visitRow) {
+  if (visitRow?.audio_keyword_hits != null) {
+    const n = Number(visitRow.audio_keyword_hits);
+    if (Number.isFinite(n)) return n;
+  }
+  const dk = visitRow?.keyword_analysis?.diagnostic_keywords;
+  if (dk && typeof dk === "object") {
+    return Object.values(dk).reduce((sum, v) => {
+      if (typeof v === "number") return sum + v;
+      if (v && typeof v === "object") return sum + (Number(v.count) || 0);
+      return sum;
+    }, 0);
+  }
+  return null;
+}
+
+function serialKeywordPct(visitRow) {
+  if (visitRow?.audio_diagnostic_term_pct != null) {
+    const n = Number(visitRow.audio_diagnostic_term_pct);
+    if (Number.isFinite(n)) return n * 100;
+  }
+  const pct = Number(visitRow?.keyword_analysis?.keyword_percentage);
+  if (Number.isFinite(pct)) return pct;
+  return null;
+}
+
+/** How many baselines vitals (BP / HR / …) need when wrapping to innerW. */
+function measureVitalLineCount(doc, innerW, parts) {
+  doc.setFontSize(8);
+  let x = 0;
+  const x0 = 0;
+  const right = innerW;
+  let lines = 1;
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    doc.setFont("helvetica", "bold");
+    const kw = doc.getTextWidth(p.k + " ");
+    doc.setFont("helvetica", "normal");
+    const vw = doc.getTextWidth(String(p.v));
+    const sepW = i > 0 ? doc.getTextWidth(" · ") : 0;
+    const needSep = i > 0 && x > x0;
+    const blockW = (needSep ? sepW : 0) + kw + vw;
+    if (x + blockW > right && x > x0) {
+      lines++;
+      x = x0;
+    }
+    if (needSep) x += sepW;
+    x += kw + vw;
+  }
+  return lines;
+}
+
+/** Draw vitals with bold labels (BP, HR, …); returns Y of last baseline. */
+function drawVitalPartsInline(doc, x0, y, innerW, parts) {
+  doc.setFontSize(8);
+  doc.setTextColor(30, 41, 59);
+  let x = x0;
+  const right = x0 + innerW;
+  const lineLead = 3.8;
+  let lineY = y;
+
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    doc.setFont("helvetica", "bold");
+    const kw = doc.getTextWidth(p.k + " ");
+    doc.setFont("helvetica", "normal");
+    const vw = doc.getTextWidth(String(p.v));
+    const sepW = i > 0 ? doc.getTextWidth(" · ") : 0;
+    const needSep = i > 0 && x > x0;
+    const blockW = (needSep ? sepW : 0) + kw + vw;
+    if (x + blockW > right && x > x0) {
+      lineY += lineLead;
+      x = x0;
+    }
+    if (needSep) {
+      doc.setFont("helvetica", "normal");
+      doc.text(" · ", x, lineY);
+      x += doc.getTextWidth(" · ");
+    }
+    doc.setFont("helvetica", "bold");
+    doc.text(p.k + " ", x, lineY);
+    x += doc.getTextWidth(p.k + " ");
+    doc.setFont("helvetica", "normal");
+    doc.text(String(p.v), x, lineY);
+    x += doc.getTextWidth(String(p.v));
+  }
+  return lineY;
 }
 
 /** Single window e.g. "0–10s" or "5s" for PDF axis */
@@ -116,8 +253,8 @@ function setTealHeaderFill(doc) {
 }
 
 function sectionBar(doc, margin, y, maxWidth, title, yRef, pageHeight) {
-  if (!ensureSpace(doc, yRef, 14, pageHeight, margin, maxWidth)) return;
-  yRef.y += 2;
+  if (!ensureSpace(doc, yRef, PDF_GAP_BEFORE_SECTION_BAR + 12, pageHeight, margin, maxWidth)) return;
+  yRef.y += PDF_GAP_BEFORE_SECTION_BAR;
   setTealHeaderFill(doc);
   doc.rect(margin, yRef.y - 3, maxWidth, 9, "F");
   doc.setDrawColor(167, 243, 208);
@@ -127,64 +264,101 @@ function sectionBar(doc, margin, y, maxWidth, title, yRef, pageHeight) {
   doc.setTextColor(17, 94, 89);
   doc.text(title, margin + 3, yRef.y + 3);
   doc.setTextColor(0, 0, 0);
-  yRef.y += 10;
+  yRef.y += PDF_GAP_AFTER_SECTION_BAR;
 }
 
-function drawVisitInfoTwoCol(doc, margin, yRef, maxWidth, visitMeta, patient, pageHeight) {
-  const boxH = 24;
-  if (!ensureSpace(doc, yRef, boxH + 4, pageHeight, margin, maxWidth)) return;
+function drawVisitInfoLine(doc, margin, yRef, maxWidth, visitMeta, patient, visit, pageHeight) {
+  const visitNum = visit?.visit_number != null && visit.visit_number !== "" ? visit.visit_number : visitMeta?.visitId ?? "—";
+  const mrn = String(patient?.medical_record_number || visitMeta?.patientId || "—");
+  const nameRaw = patient
+    ? `${patient.first_name || ""} ${patient.last_name || ""}`.trim()
+    : "Unknown Patient";
+  let nameDisp = nameRaw || "—";
+
+  const padX = 4;
+  const innerW = maxWidth - padX * 2;
+  const lineLead = 4.2;
+  doc.setFontSize(8);
+  doc.setTextColor(30, 41, 59);
+
+  const measureRowWidth = (nameTry) => {
+    let w = 0;
+    const add = (bold, t) => {
+      doc.setFont("helvetica", bold ? "bold" : "normal");
+      w += doc.getTextWidth(t);
+    };
+    add(true, "Patient: ");
+    add(false, nameTry);
+    add(false, "  ·  ");
+    add(true, "MRN: ");
+    add(false, mrn);
+    add(false, "  ·  ");
+    add(true, "Visit number: ");
+    add(false, String(visitNum));
+    return w;
+  };
+
+  while (nameDisp.length > 4 && measureRowWidth(nameDisp) > innerW) {
+    nameDisp = nameDisp.slice(0, Math.max(4, Math.floor(nameDisp.length * 0.82))).trimEnd() + "…";
+  }
+
+  const boxH = 8 + lineLead;
+  if (!ensureSpace(doc, yRef, boxH + 6, pageHeight, margin, maxWidth)) return;
   doc.setDrawColor(153, 246, 228);
   doc.setFillColor(248, 253, 252);
   doc.roundedRect(margin, yRef.y, maxWidth, boxH, 1.5, 1.5, "FD");
-  doc.setFont("helvetica", "normal");
-  doc.setFontSize(7.5);
-  const colW = maxWidth / 2 - 6;
-  const leftX = margin + 4;
-  const rightX = margin + maxWidth / 2 + 2;
-  let ty = yRef.y + 5;
-  const row = (label, val, x) => {
-    doc.setTextColor(13, 148, 136);
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(6);
-    doc.text(String(label).toUpperCase(), x, ty);
-    ty += 3;
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(8);
-    doc.setTextColor(17, 94, 89);
-    doc.text(truncate(val || "—", 42), x, ty);
-    ty += 5.2;
+
+  let x = margin + padX;
+  const baseY = yRef.y + 6;
+  const put = (bold, t) => {
+    doc.setFont("helvetica", bold ? "bold" : "normal");
+    doc.text(t, x, baseY);
+    x += doc.getTextWidth(t);
   };
-  row("Visit ID", visitMeta?.visitId, leftX);
-  ty = yRef.y + 5;
-  row("MRN", patient?.medical_record_number || visitMeta?.patientId, rightX);
-  ty = yRef.y + 15.2;
-  const name = patient ? `${patient.first_name || ""} ${patient.last_name || ""}`.trim() : "Unknown Patient";
-  row("Patient name", name || "—", leftX);
+  put(true, "Patient: ");
+  put(false, nameDisp);
+  put(false, "  ·  ");
+  put(true, "MRN: ");
+  put(false, mrn);
+  put(false, "  ·  ");
+  put(true, "Visit number: ");
+  put(false, String(visitNum));
+
   doc.setTextColor(0, 0, 0);
-  yRef.y += boxH + 3;
+  yRef.y += boxH + PDF_GAP_AFTER_CONTENT_BOX;
 }
 
 function drawVitalsGrid(doc, margin, yRef, maxWidth, vitals, visit, pageHeight) {
   const v = vitals || {};
   const textWidth = maxWidth - 8;
+  const vitalParts = [
+    { k: "BP", v: `${v.bp_systolic ?? "—"}/${v.bp_diastolic ?? "—"}` },
+    { k: "HR", v: String(v.heart_rate ?? "—") },
+    { k: "RR", v: String(v.respiratory_rate ?? "—") },
+    { k: "Temp", v: `${v.temperature ?? "—"}${v.temperature_unit === "celsius" ? "°C" : "°F"}` },
+    { k: "SpO₂", v: `${v.spo2 ?? "—"}%` },
+    { k: "BMI", v: String(v.bmi ?? "—") },
+  ];
   const items = [
-    ["Visit date", toDateLabel(v.visit_date || visit?.visit_date)],
-    ["Chief complaint", truncate(v.chief_complaint || visit?.chief_complaint || "—", 120)],
-    [
-      "Vitals",
-      `BP ${v.bp_systolic ?? "—"}/${v.bp_diastolic ?? "—"} · HR ${v.heart_rate ?? "—"} · RR ${v.respiratory_rate ?? "—"} · ` +
-        `Temp ${v.temperature ?? "—"}${v.temperature_unit === "celsius" ? "°C" : "°F"} · SpO₂ ${v.spo2 ?? "—"}% · BMI ${v.bmi ?? "—"}`,
-    ],
+    ["Visit date", toDateLabel(v.visit_date || visit?.visit_date), "text"],
+    ["Chief complaint", truncate(v.chief_complaint || visit?.chief_complaint || "—", 120), "text"],
+    ["Vitals", vitalParts, "vitals"],
   ];
 
   /** Match the draw loop: top inset, header, then per-item label + wrapped value + gap */
   const lineLead = 3.6;
+  const vitalLineLead = 3.8;
   let simY = 5 + 5;
-  items.forEach(([, val]) => {
+  items.forEach(([, val, kind]) => {
     simY += 3.2;
-    simY += doc.splitTextToSize(val, textWidth).length * lineLead + 1.4;
+    if (kind === "vitals") {
+      const vLines = measureVitalLineCount(doc, textWidth, val);
+      simY += vLines * vitalLineLead + 1.4;
+    } else {
+      simY += doc.splitTextToSize(val, textWidth).length * lineLead + 1.4;
+    }
   });
-  const h = simY + 3;
+  const h = simY + 2;
 
   if (!ensureSpace(doc, yRef, h + 6, pageHeight, margin, maxWidth)) return;
   doc.setDrawColor(153, 246, 228);
@@ -196,20 +370,24 @@ function drawVitalsGrid(doc, margin, yRef, maxWidth, vitals, visit, pageHeight) 
   doc.setTextColor(13, 148, 136);
   doc.text("VITAL SIGNS", margin + 4, ly);
   ly += 5;
-  doc.setFont("helvetica", "normal");
   doc.setFontSize(8);
   doc.setTextColor(30, 41, 59);
-  items.forEach(([lab, val]) => {
+  items.forEach(([lab, val, kind]) => {
     doc.setFont("helvetica", "bold");
     doc.setFontSize(7);
     doc.text(`${lab}:`, margin + 4, ly);
     ly += 3.2;
-    doc.setFont("helvetica", "normal");
-    const lines = doc.splitTextToSize(val, textWidth);
-    doc.text(lines, margin + 4, ly);
-    ly += lines.length * lineLead + 1.4;
+    if (kind === "vitals") {
+      const endY = drawVitalPartsInline(doc, margin + 4, ly, textWidth, val);
+      ly = endY + 1.4;
+    } else {
+      doc.setFont("helvetica", "normal");
+      const lines = doc.splitTextToSize(val, textWidth);
+      doc.text(lines, margin + 4, ly);
+      ly += lines.length * lineLead + 1.4;
+    }
   });
-  yRef.y += h + 1.5;
+  yRef.y += h + PDF_GAP_AFTER_CONTENT_BOX;
 }
 
 function pctStr(v) {
@@ -219,7 +397,7 @@ function pctStr(v) {
 
 function drawConfidenceStrip(doc, margin, yRef, maxWidth, multimodal, recordCounts, pageHeight) {
   const rowH = 18;
-  if (!ensureSpace(doc, yRef, rowH + 4, pageHeight, margin, maxWidth)) return;
+  if (!ensureSpace(doc, yRef, rowH + PDF_GAP_AFTER_CONTENT_BOX + 2, pageHeight, margin, maxWidth)) return;
   const { co, cf, ca, cg } = multimodal || {};
   const { face = 0, audio = 0, gait = 0 } = recordCounts || {};
   const tiles = [
@@ -262,7 +440,7 @@ function drawConfidenceStrip(doc, margin, yRef, maxWidth, multimodal, recordCoun
     x += tw + 3;
   });
   doc.setTextColor(0, 0, 0);
-  yRef.y += rowH + 4;
+  yRef.y += rowH + PDF_GAP_AFTER_CONTENT_BOX;
 }
 
 /** Horizontal bar chart — mirrors “Emotion distribution” card */
@@ -291,7 +469,7 @@ function drawEmotionBars(doc, margin, yRef, maxWidth, sorted, pageHeight) {
     doc.setFillColor(r, g, b);
     doc.circle(baseX + 1.5, baseY + 1.8, dotR, "F");
 
-    doc.setFont("helvetica", "normal");
+    doc.setFont("helvetica", "bold");
     doc.setFontSize(7.5);
     doc.setTextColor(15, 118, 110);
     doc.text(truncate(labelEmo(key), 13), baseX + 4.2, baseY + 2.6);
@@ -448,12 +626,8 @@ function drawSentimentMiniChart(doc, margin, yRef, maxWidth, audioDerived, pageH
   const chartH = 32;
   const lineH = 3.6;
   const polarities = ws.map((w) => Number(w?.features?.sentiment?.polarity ?? 0));
-  const coverageSubtitle = chartElapsedCoverageSubtitle(ws);
-  const coverageLines = coverageSubtitle
-    ? doc.splitTextToSize(coverageSubtitle, maxWidth)
-    : [];
   const belowPlotReserve = 14;
-  const headerReserve = 5 + coverageLines.length * lineH + 1;
+  const headerReserve = 5;
   const summaryReserve = 2 * lineH + 4;
   const totalNeed = headerReserve + chartH + belowPlotReserve + summaryReserve;
   if (!ensureSpace(doc, yRef, totalNeed, pageHeight, margin, maxWidth)) return;
@@ -462,13 +636,6 @@ function drawSentimentMiniChart(doc, margin, yRef, maxWidth, audioDerived, pageH
   doc.setTextColor(17, 94, 89);
   doc.text("Sentiment polarity over time", margin, yRef.y);
   yRef.y += 5;
-  if (coverageLines.length) {
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(6.5);
-    doc.setTextColor(80, 100, 98);
-    doc.text(coverageLines, margin, yRef.y);
-    yRef.y += coverageLines.length * lineH + 1;
-  }
   doc.setTextColor(0, 0, 0);
   const plotY = yRef.y;
   const plotH = 22;
@@ -598,11 +765,6 @@ function drawGaitSparkline(doc, margin, yRef, maxWidth, gaitDerived, pageHeight)
     doc.setLineWidth(0.5);
     const y = plotY + plotH / 2;
     doc.line(plotX + 2, y, plotX + plotW - 2, y);
-    doc.setFontSize(4.8);
-    doc.setTextColor(4, 120, 87);
-    const only = pts[0];
-    const x = plotX + plotW / 2;
-    doc.text(`${Number(only.s).toFixed(2)}`, x, y - 2, { align: "center" });
   } else {
     doc.setDrawColor(4, 120, 87);
     doc.setLineWidth(0.6);
@@ -617,10 +779,6 @@ function drawGaitSparkline(doc, margin, yRef, maxWidth, gaitDerived, pageHeight)
       const y = plotY + plotH - ((p.s - minS) / (maxS - minS)) * (plotH - 4) - 2;
       doc.setFillColor(4, 120, 87);
       doc.circle(x, y, 0.9, "F");
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(4.8);
-      doc.setTextColor(71, 85, 105);
-      doc.text(String(Number(p.s).toFixed(2)), x, y - 2.2, { align: "center" });
     });
   }
 
@@ -648,6 +806,376 @@ function drawGaitSparkline(doc, margin, yRef, maxWidth, gaitDerived, pageHeight)
   yRef.y = tableY + 4;
 }
 
+/** Serial trend line chart for gait speed across visits */
+function drawSerialGaitTrend(doc, margin, yRef, maxWidth, serialVisits, pageHeight) {
+  const rows = (serialVisits || [])
+    .map((s) => ({ ...s, __gaitSpeed: serialGaitSpeedValue(s) }))
+    .filter((s) => s.__gaitSpeed != null)
+    .slice(0, 12);
+  if (!rows.length) return;
+
+  const lineH = 3.6;
+  const axisW = 14;
+  const plotH = 28;
+  const subtitle = "Gait speed trend over visits";
+  const subtitleLines = doc.splitTextToSize(subtitle, maxWidth);
+  const totalNeed = 5 + subtitleLines.length * lineH + 1 + plotH + 10;
+  if (!ensureSpace(doc, yRef, totalNeed, pageHeight, margin, maxWidth)) return;
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(7.5);
+  doc.setTextColor(17, 94, 89);
+  doc.text("Serial gait trend (m/s)", margin, yRef.y);
+  yRef.y += 5;
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(6.5);
+  doc.setTextColor(80, 100, 98);
+  doc.text(subtitleLines, margin, yRef.y);
+  yRef.y += subtitleLines.length * lineH + 1;
+  doc.setTextColor(0, 0, 0);
+
+  const plotY = yRef.y;
+  const plotX = margin + axisW;
+  const plotW = maxWidth - axisW - 4;
+  doc.setDrawColor(167, 243, 208);
+  doc.setFillColor(255, 255, 255);
+  doc.rect(plotX, plotY, plotW, plotH, "FD");
+
+  const speeds = rows.map((s) => Number(s.__gaitSpeed));
+  const minS = Math.min(...speeds);
+  const maxS = Math.max(...speeds, minS + 0.01);
+  const midS = (minS + maxS) / 2;
+  const yFor = (s) => plotY + plotH - ((s - minS) / (maxS - minS)) * (plotH - 4) - 2;
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(5.5);
+  doc.setTextColor(100, 116, 139);
+  doc.text(fmtMax2(maxS), margin, yFor(maxS) + 1);
+  doc.text(fmtMax2(midS), margin, yFor(midS) + 1);
+  doc.text(fmtMax2(minS), margin, yFor(minS) + 1);
+
+  doc.setDrawColor(4, 120, 87);
+  doc.setLineWidth(0.6);
+  const xAt = (i) => (rows.length <= 1 ? plotX + plotW / 2 : plotX + (i / Math.max(1, rows.length - 1)) * plotW);
+  for (let i = 0; i < rows.length - 1; i++) {
+    doc.line(xAt(i), yFor(speeds[i]), xAt(i + 1), yFor(speeds[i + 1]));
+  }
+  rows.forEach((_, i) => {
+    doc.setFillColor(4, 120, 87);
+    doc.circle(xAt(i), yFor(speeds[i]), 0.9, "F");
+  });
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(4.6);
+  doc.setTextColor(90, 100, 110);
+  const tickStep = rows.length <= 6 ? 1 : Math.ceil(rows.length / 6);
+  for (let i = 0; i < rows.length; i += tickStep) {
+    const lbl = `V${rows[i].visit_number ?? i + 1}`;
+    doc.text(lbl, xAt(i), plotY + plotH + 3.2, { align: "center" });
+  }
+  if ((rows.length - 1) % tickStep !== 0 && rows.length > 1) {
+    const j = rows.length - 1;
+    const lbl = `V${rows[j].visit_number ?? j + 1}`;
+    doc.text(lbl, xAt(j), plotY + plotH + 3.2, { align: "center" });
+  }
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(5.2);
+  doc.setTextColor(4, 120, 87);
+  doc.text("● Speed (m/s)", margin, plotY + plotH + 8);
+  yRef.y = plotY + plotH + 11;
+}
+
+/** Serial trend line chart for face emotion percentages across visits */
+function drawSerialFaceTrend(doc, margin, yRef, maxWidth, serialVisits, pageHeight) {
+  const rows = (serialVisits || []).slice(0, 12);
+  const seriesDefs = [
+    { key: "neutral", label: "Neutral", color: [148, 163, 184] },
+    { key: "happy", label: "Happy", color: [244, 162, 97] },
+    { key: "sad", label: "Sad", color: [69, 123, 157] },
+    { key: "angry", label: "Angry", color: [230, 57, 70] },
+    { key: "surprise", label: "Surprise", color: [255, 183, 3] },
+  ];
+  const series = seriesDefs
+    .map((s) => ({ ...s, vals: rows.map((r) => serialFacePctValue(r, s.key)) }))
+    .filter((s) => s.vals.some((v) => v != null));
+  if (!series.length) return;
+
+  const plotH = 28;
+  const axisW = 10;
+  const totalNeed = 5 + plotH + 12;
+  if (!ensureSpace(doc, yRef, totalNeed, pageHeight, margin, maxWidth)) return;
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(7.5);
+  doc.setTextColor(17, 94, 89);
+  doc.text("Face subsystem trend (%)", margin, yRef.y);
+  yRef.y += 5;
+
+  const plotY = yRef.y;
+  const plotX = margin + axisW;
+  const plotW = maxWidth - axisW - 4;
+  doc.setDrawColor(167, 243, 208);
+  doc.setFillColor(255, 255, 255);
+  doc.rect(plotX, plotY, plotW, plotH, "FD");
+
+  const n = rows.length;
+  const xAt = (i) => (n <= 1 ? plotX + plotW / 2 : plotX + (i / Math.max(1, n - 1)) * plotW);
+  const yAt = (v) => plotY + plotH - 2 - (Math.max(0, Math.min(100, v)) / 100) * (plotH - 4);
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(5.5);
+  doc.setTextColor(100, 116, 139);
+  doc.text("100%", margin + 1, yAt(100) + 1);
+  doc.text("50%", margin + 1, yAt(50) + 1);
+  doc.text("0%", margin + 1, yAt(0) + 1);
+
+  series.forEach((s) => {
+    const [R, G, B] = s.color;
+    doc.setDrawColor(R, G, B);
+    doc.setLineWidth(0.45);
+    for (let i = 0; i < n - 1; i++) {
+      const a = s.vals[i];
+      const b = s.vals[i + 1];
+      if (a == null || b == null) continue;
+      doc.line(xAt(i), yAt(a), xAt(i + 1), yAt(b));
+    }
+    for (let i = 0; i < n; i++) {
+      const v = s.vals[i];
+      if (v == null) continue;
+      doc.setFillColor(R, G, B);
+      doc.circle(xAt(i), yAt(v), 0.7, "F");
+    }
+  });
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(4.6);
+  doc.setTextColor(90, 100, 110);
+  const tickStep = n <= 6 ? 1 : Math.ceil(n / 6);
+  for (let i = 0; i < n; i += tickStep) {
+    doc.text(`V${rows[i].visit_number ?? i + 1}`, xAt(i), plotY + plotH + 3.2, { align: "center" });
+  }
+  if ((n - 1) % tickStep !== 0 && n > 1) {
+    doc.text(`V${rows[n - 1].visit_number ?? n}`, xAt(n - 1), plotY + plotH + 3.2, { align: "center" });
+  }
+  let lx = margin;
+  let ly = plotY + plotH + 8;
+  series.forEach((s) => {
+    const [R, G, B] = s.color;
+    if (lx + 26 > margin + maxWidth) {
+      lx = margin;
+      ly += 3.6;
+    }
+    doc.setFillColor(R, G, B);
+    doc.circle(lx + 1.2, ly - 1, 0.75, "F");
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(5.2);
+    doc.setTextColor(71, 85, 105);
+    doc.text(s.label, lx + 3.1, ly);
+    lx += 3.1 + doc.getTextWidth(s.label) + 6;
+  });
+  yRef.y = ly + 3;
+}
+
+/** Serial trend line chart for audio sentiment + distress across visits */
+function drawSerialAudioTrend(doc, margin, yRef, maxWidth, serialVisits, pageHeight) {
+  const rows = (serialVisits || []).slice(0, 12);
+  const points = rows.map((r) => {
+    const sent = Number(r?.sentiment_score ?? r?.sentiment_analysis?.sentiment_score);
+    return {
+      visit: r,
+      sentiment: Number.isFinite(sent) ? sent : null,
+      distress: serialDistressLevel(r),
+    };
+  });
+  if (!points.some((p) => p.sentiment != null || p.distress != null)) return;
+
+  const plotH = 28;
+  const axisW = 14;
+  const totalNeed = 5 + plotH + 12;
+  if (!ensureSpace(doc, yRef, totalNeed, pageHeight, margin, maxWidth)) return;
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(7.5);
+  doc.setTextColor(17, 94, 89);
+  doc.text("Audio subsystem trend", margin, yRef.y);
+  yRef.y += 5;
+
+  const plotY = yRef.y;
+  const plotX = margin + axisW;
+  const plotW = maxWidth - axisW - 4;
+  doc.setDrawColor(167, 243, 208);
+  doc.setFillColor(255, 255, 255);
+  doc.rect(plotX, plotY, plotW, plotH, "FD");
+
+  const n = points.length;
+  const xAt = (i) => (n <= 1 ? plotX + plotW / 2 : plotX + (i / Math.max(1, n - 1)) * plotW);
+  const sentVals = points.map((p) => p.sentiment).filter((v) => v != null);
+  const minSent = sentVals.length ? Math.min(...sentVals) : -1;
+  const maxSent = sentVals.length ? Math.max(...sentVals, minSent + 0.01) : 1;
+  const midSent = (minSent + maxSent) / 2;
+  const ySent = (v) => plotY + plotH - ((v - minSent) / (maxSent - minSent)) * (plotH - 4) - 2;
+  const yDist = (v) => plotY + plotH - ((v - 1) / 2) * (plotH - 4) - 2;
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(5.2);
+  doc.setTextColor(37, 99, 235);
+  doc.text(fmtMax2(maxSent), margin, ySent(maxSent) + 1);
+  doc.text(fmtMax2(midSent), margin, ySent(midSent) + 1);
+  doc.text(fmtMax2(minSent), margin, ySent(minSent) + 1);
+  doc.setTextColor(147, 51, 234);
+  doc.text("3", plotX + plotW + 1.2, yDist(3) + 1);
+  doc.text("2", plotX + plotW + 1.2, yDist(2) + 1);
+  doc.text("1", plotX + plotW + 1.2, yDist(1) + 1);
+
+  doc.setDrawColor(37, 99, 235);
+  doc.setLineWidth(0.5);
+  for (let i = 0; i < n - 1; i++) {
+    const a = points[i].sentiment;
+    const b = points[i + 1].sentiment;
+    if (a == null || b == null) continue;
+    doc.line(xAt(i), ySent(a), xAt(i + 1), ySent(b));
+  }
+  for (let i = 0; i < n; i++) {
+    const v = points[i].sentiment;
+    if (v == null) continue;
+    doc.setFillColor(37, 99, 235);
+    doc.circle(xAt(i), ySent(v), 0.75, "F");
+  }
+
+  doc.setDrawColor(147, 51, 234);
+  doc.setLineWidth(0.35);
+  for (let i = 0; i < n - 1; i++) {
+    const a = points[i].distress;
+    const b = points[i + 1].distress;
+    if (a == null || b == null) continue;
+    doc.line(xAt(i), yDist(a), xAt(i + 1), yDist(b));
+  }
+  for (let i = 0; i < n; i++) {
+    const v = points[i].distress;
+    if (v == null) continue;
+    doc.setFillColor(147, 51, 234);
+    doc.circle(xAt(i), yDist(v), 0.65, "F");
+  }
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(4.6);
+  doc.setTextColor(90, 100, 110);
+  const tickStep = n <= 6 ? 1 : Math.ceil(n / 6);
+  for (let i = 0; i < n; i += tickStep) {
+    doc.text(`V${points[i].visit.visit_number ?? i + 1}`, xAt(i), plotY + plotH + 3.2, { align: "center" });
+  }
+  if ((n - 1) % tickStep !== 0 && n > 1) {
+    doc.text(`V${points[n - 1].visit.visit_number ?? n}`, xAt(n - 1), plotY + plotH + 3.2, { align: "center" });
+  }
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(5.2);
+  doc.setTextColor(37, 99, 235);
+  doc.text("Sentiment score", margin, plotY + plotH + 8);
+  doc.setTextColor(147, 51, 234);
+  doc.text("Distress (1–3)", margin + 24, plotY + plotH + 8);
+  yRef.y = plotY + plotH + 11;
+}
+
+/** Serial trend line chart for diagnostic keyword count and keyword percentage */
+function drawSerialKeywordTrend(doc, margin, yRef, maxWidth, serialVisits, pageHeight) {
+  const rows = (serialVisits || []).slice(0, 12);
+  const points = rows.map((r) => ({
+    visit: r,
+    count: serialKeywordCount(r),
+    pct: serialKeywordPct(r),
+  }));
+  if (!points.some((p) => p.count != null || p.pct != null)) return;
+
+  const plotH = 28;
+  const axisW = 14;
+  const totalNeed = 5 + plotH + 12;
+  if (!ensureSpace(doc, yRef, totalNeed, pageHeight, margin, maxWidth)) return;
+
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(7.5);
+  doc.setTextColor(17, 94, 89);
+  doc.text("Diagnostic keyword trend", margin, yRef.y);
+  yRef.y += 5;
+
+  const plotY = yRef.y;
+  const plotX = margin + axisW;
+  const plotW = maxWidth - axisW - 4;
+  doc.setDrawColor(167, 243, 208);
+  doc.setFillColor(255, 255, 255);
+  doc.rect(plotX, plotY, plotW, plotH, "FD");
+
+  const n = points.length;
+  const xAt = (i) => (n <= 1 ? plotX + plotW / 2 : plotX + (i / Math.max(1, n - 1)) * plotW);
+  const counts = points.map((p) => p.count).filter((v) => v != null);
+  const minC = counts.length ? Math.min(...counts) : 0;
+  const maxC = counts.length ? Math.max(...counts, minC + 1) : 1;
+  const midC = (minC + maxC) / 2;
+  const yCount = (v) => plotY + plotH - ((v - minC) / (maxC - minC)) * (plotH - 4) - 2;
+  const yPct = (v) => plotY + plotH - (Math.max(0, Math.min(100, v)) / 100) * (plotH - 4) - 2;
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(5.2);
+  doc.setTextColor(13, 148, 136);
+  doc.text(fmtMax2(maxC), margin, yCount(maxC) + 1);
+  doc.text(fmtMax2(midC), margin, yCount(midC) + 1);
+  doc.text(fmtMax2(minC), margin, yCount(minC) + 1);
+  doc.setTextColor(124, 58, 237);
+  doc.text("100%", plotX + plotW + 1.2, yPct(100) + 1);
+  doc.text("50%", plotX + plotW + 1.2, yPct(50) + 1);
+  doc.text("0%", plotX + plotW + 1.2, yPct(0) + 1);
+
+  doc.setDrawColor(13, 148, 136);
+  doc.setLineWidth(0.5);
+  for (let i = 0; i < n - 1; i++) {
+    const a = points[i].count;
+    const b = points[i + 1].count;
+    if (a == null || b == null) continue;
+    doc.line(xAt(i), yCount(a), xAt(i + 1), yCount(b));
+  }
+  for (let i = 0; i < n; i++) {
+    const v = points[i].count;
+    if (v == null) continue;
+    doc.setFillColor(13, 148, 136);
+    doc.circle(xAt(i), yCount(v), 0.75, "F");
+  }
+
+  doc.setDrawColor(124, 58, 237);
+  doc.setLineWidth(0.35);
+  for (let i = 0; i < n - 1; i++) {
+    const a = points[i].pct;
+    const b = points[i + 1].pct;
+    if (a == null || b == null) continue;
+    doc.line(xAt(i), yPct(a), xAt(i + 1), yPct(b));
+  }
+  for (let i = 0; i < n; i++) {
+    const v = points[i].pct;
+    if (v == null) continue;
+    doc.setFillColor(124, 58, 237);
+    doc.circle(xAt(i), yPct(v), 0.65, "F");
+  }
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(4.6);
+  doc.setTextColor(90, 100, 110);
+  const tickStep = n <= 6 ? 1 : Math.ceil(n / 6);
+  for (let i = 0; i < n; i += tickStep) {
+    doc.text(`V${points[i].visit.visit_number ?? i + 1}`, xAt(i), plotY + plotH + 3.2, { align: "center" });
+  }
+  if ((n - 1) % tickStep !== 0 && n > 1) {
+    doc.text(`V${points[n - 1].visit.visit_number ?? n}`, xAt(n - 1), plotY + plotH + 3.2, { align: "center" });
+  }
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(5.2);
+  doc.setTextColor(13, 148, 136);
+  doc.text("Keyword count", margin, plotY + plotH + 8);
+  doc.setTextColor(124, 58, 237);
+  doc.text("Keyword ratio", margin + 30, plotY + plotH + 8);
+  yRef.y = plotY + plotH + 14;
+  doc.setTextColor(0, 0, 0);
+}
+
+
 function addWrapped(doc, yRef, text, size, bold, margin, maxWidth, pageHeight, indent = 0) {
   const line = bold ? 4.4 : 4.2;
   const lines = doc.splitTextToSize(String(text), maxWidth - indent);
@@ -666,32 +1194,21 @@ function bulletLines(doc, yRef, items, margin, maxWidth, pageHeight, maxItems) {
   });
 }
 
-function buildNlpSnippet(nlpVisit) {
-  if (!nlpVisit) return null;
-  const chunks = [];
-  const sa = nlpVisit.sentiment_analysis;
-  if (sa?.overall_sentiment || sa?.sentiment_score != null) {
-    const parts = [];
-    if (sa.overall_sentiment) parts.push(String(sa.overall_sentiment));
-    if (sa.sentiment_score != null) parts.push(`score ${sa.sentiment_score}`);
-    if (sa.distress_level) parts.push(`distress ${sa.distress_level}`);
-    chunks.push(`Sentiment: ${parts.join(" · ")}`);
-  }
-  const ka = nlpVisit.keyword_analysis;
-  if (ka?.top_keywords?.length) {
-    const top = ka.top_keywords
-      .slice(0, 6)
-      .map((kw) => `${kw.word} (${kw.count}${kw.category ? `, ${kw.category}` : ""})`);
-    chunks.push(`Top keywords: ${top.join(", ")}`);
-  } else if (ka?.diagnostic_keywords && typeof ka.diagnostic_keywords === "object") {
-    const top = Object.entries(ka.diagnostic_keywords)
-      .map(([w, d]) => ({ w, c: typeof d === "object" ? d.count : d }))
-      .sort((a, b) => b.c - a.c)
-      .slice(0, 6)
-      .map(({ w, c }) => `${w} (${c})`);
-    if (top.length) chunks.push(`Diagnostic keywords: ${top.join(", ")}`);
-  }
-  return chunks.length ? chunks.join("\n\n") : null;
+/** Visit-level sentiment summary from saved transcription / NLP. */
+function drawTranscriptSentimentSummary(doc, margin, yRef, maxWidth, pageHeight, nlpVisit) {
+  const sa = nlpVisit?.sentiment_analysis;
+  if (!sa || (!sa.overall_sentiment && sa.sentiment_score == null && !sa.distress_level)) return false;
+
+  const parts = [];
+  if (sa.overall_sentiment) parts.push(`Overall: ${String(sa.overall_sentiment)}`);
+  if (sa.sentiment_score != null) parts.push(`Score: ${fmtMax2(sa.sentiment_score)}`);
+  if (sa.distress_level) parts.push(`Distress: ${String(sa.distress_level)}`);
+  const valueLine = parts.join(" · ");
+
+  if (!addWrapped(doc, yRef, valueLine, 9.5, true, margin, maxWidth, pageHeight)) return false;
+  yRef.y += 1.5;
+  doc.setTextColor(0, 0, 0);
+  return true;
 }
 
 /**
@@ -728,6 +1245,12 @@ export function generateCombinedReportPDF({
 
   // --- Title (matches Report Summary header) ---
   doc.setFont("helvetica", "bold");
+  doc.setFontSize(11);
+  doc.setTextColor(17, 94, 89);
+  doc.text("Doctor AI: Smart Examination Room", pageWidth / 2, yRef.y, { align: "center" });
+  yRef.y += 6;
+
+  doc.setFont("helvetica", "bold");
   doc.setFontSize(17);
   doc.setTextColor(17, 94, 89);
   doc.text("Report summary", pageWidth / 2, yRef.y, { align: "center" });
@@ -735,16 +1258,11 @@ export function generateCombinedReportPDF({
   doc.setFont("helvetica", "normal");
   doc.setFontSize(9);
   doc.setTextColor(45, 110, 101);
-  doc.text("Visit review · multimodal, transcription & AI", pageWidth / 2, yRef.y, { align: "center" });
-  yRef.y += 6;
-  doc.setTextColor(80, 90, 88);
-  doc.setFontSize(8);
-  doc.text(`Generated ${format(new Date(), "MMM d, yyyy h:mm a")}`, pageWidth / 2, yRef.y, { align: "center" });
-  yRef.y += 8;
+  yRef.y += 2;
   doc.setTextColor(0, 0, 0);
 
   section("Visit info");
-  drawVisitInfoTwoCol(doc, margin, yRef, maxWidth, visitMeta, patient, pageHeight);
+  drawVisitInfoLine(doc, margin, yRef, maxWidth, visitMeta, patient, visit, pageHeight);
 
   section("Vital signs");
   drawVitalsGrid(doc, margin, yRef, maxWidth, vitals, visit, pageHeight);
@@ -757,13 +1275,17 @@ export function generateCombinedReportPDF({
   if (faceDerived?.sorted?.length) {
     drawEmotionBars(doc, margin, yRef, maxWidth, faceDerived.sorted, pageHeight);
     drawEmotionFrequencyOverTime(doc, margin, yRef, maxWidth, faceDerived, pageHeight);
-    addText(`Data quality: ${faceDerived.anyInvalid ? "Issues flagged in pipeline" : "Valid"}`, 8, false);
   } else {
     addText("No facial expression summary available for this visit.", 9);
   }
 
-  // Audio
-  section("Audio & language analysis");
+  // Audio (per-window) + visit-level transcription / NLP — single section
+  section("Audio & transcription / NLP");
+  yRef.y += PDF_GAP_UNDER_AUDIO_SECTION;
+  const drewSentiment = drawTranscriptSentimentSummary(doc, margin, yRef, maxWidth, pageHeight, nlpVisit);
+  if (!drewSentiment) {
+    addText("No visit-level sentiment summary saved for this visit (transcription / NLP).", 8);
+  }
   if (audioDerived) {
     drawSentimentMiniChart(doc, margin, yRef, maxWidth, audioDerived, pageHeight);
     if (audioDerived.kwSorted?.length) {
@@ -790,9 +1312,8 @@ export function generateCombinedReportPDF({
         5
       );
     }
-    addText(`Data quality: ${audioDerived.anyInvalid ? "Issues flagged" : "Valid"}`, 8);
   } else {
-    addText("No audio / language summary available.", 9);
+    addText("No per-window audio / language summary available.", 9);
   }
 
   // Gait
@@ -819,16 +1340,9 @@ export function generateCombinedReportPDF({
         .join(" · ");
       addText(eventsLine, 7.8);
     }
-    addText(`Data quality: ${gaitDerived.anyInvalid ? "Issues flagged" : "Valid"}`, 8);
   } else {
     addText("No gait summary available.", 9);
   }
-
-  // NLP
-  section("Transcription & NLP");
-  const nlp = buildNlpSnippet(nlpVisit);
-  if (nlp) addText(nlp, 8);
-  else addText("No saved transcription or NLP fields for this visit.", 8);
 
   // AI — mirror subsection labels from UI
   section("AI diagnostic assessment");
@@ -860,14 +1374,16 @@ export function generateCombinedReportPDF({
 
   section("Serial trend analysis");
   if (serialVisits.length) {
+    drawSerialFaceTrend(doc, margin, yRef, maxWidth, serialVisits, pageHeight);
+    drawSerialAudioTrend(doc, margin, yRef, maxWidth, serialVisits, pageHeight);
+    drawSerialKeywordTrend(doc, margin, yRef, maxWidth, serialVisits, pageHeight);
+    drawSerialGaitTrend(doc, margin, yRef, maxWidth, serialVisits, pageHeight);
+    doc.setFont("helvetica", "normal");
+    doc.setTextColor(0, 0, 0);
+    addText("AI summary by visit", 8.5, true);
     serialVisits.slice(0, 6).forEach((s) => {
-      const line =
-        `Visit #${s.visit_number} (${toDateLabel(s.visit_date)}) — ` +
-        `BP ${s.bp_systolic}/${s.bp_diastolic}, HR ${s.heart_rate}, ` +
-        `sentiment ${s.sentiment_score != null ? s.sentiment_score.toFixed(2) : "—"}, ` +
-        `face (N/H/Sa/A/Su) ${formatSerialFaceEmotionPcts(s)}, ` +
-        `gait ${s.gait_avg_speed_mps != null ? `${s.gait_avg_speed_mps.toFixed(2)} m/s` : "—"}`;
-      if (!addText(line, 8)) return;
+      const line = `Visit #${s.visit_number} (${toDateLabel(s.visit_date)})`;
+      if (!addText(line, 8.2, true)) return;
       if (s.ai_assessment?.suggested_diagnoses?.length) {
         bulletLines(
           doc,
