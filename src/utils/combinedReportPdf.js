@@ -193,13 +193,21 @@ function drawVitalPartsInline(doc, x0, y, innerW, parts) {
   return lineY;
 }
 
-/** Single window e.g. "0–10s" or "5s" for PDF axis */
+/** Elapsed seconds string for PDF (2 decimal places). */
+function formatElapsedSecForPdf(n) {
+  const x = Number(n);
+  if (n == null || Number.isNaN(x)) return String(n ?? "");
+  return x.toFixed(2);
+}
+
+/** Single window e.g. "0.00–10.00s" or "5.00s" for PDF axis */
 function windowRangeShort(w) {
   if (!w) return "";
   const a = w.t_start;
   const b = w.t_end;
-  if (a != null && b != null && Number(b) !== Number(a)) return `${a}–${b}s`;
-  if (a != null) return `${a}s`;
+  if (a != null && b != null && Number(b) !== Number(a))
+    return `${formatElapsedSecForPdf(a)}–${formatElapsedSecForPdf(b)}s`;
+  if (a != null) return `${formatElapsedSecForPdf(a)}s`;
   return "";
 }
 
@@ -211,7 +219,7 @@ function chartElapsedCoverageSubtitle(windowsSlice) {
   const start = first?.t_start;
   const end = last?.t_end != null ? last.t_end : last?.t_start;
   if (start != null && end != null) {
-    return `Elapsed time: ${start}s–${end}s · ${windowsSlice.length} windows`;
+    return `Elapsed time: ${formatElapsedSecForPdf(start)}s–${formatElapsedSecForPdf(end)}s · ${windowsSlice.length} windows`;
   }
   return `${windowsSlice.length} analysis windows`;
 }
@@ -514,7 +522,9 @@ function buildEmotionTimelineForPdf(faceDerived) {
       return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
     }
   );
-  const labels = windows.map((w) => `${w.t_start}s–${w.t_end}s`);
+  const labels = windows.map(
+    (w) => `${formatElapsedSecForPdf(w.t_start)}s–${formatElapsedSecForPdf(w.t_end)}s`
+  );
   const datasets = allEmos.map((emo) => ({
     label: labelEmo(emo),
     key: emo,

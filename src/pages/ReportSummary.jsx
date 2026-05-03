@@ -80,6 +80,16 @@ const chartBox = "relative h-[180px] w-full";
 const chartBoxTall = "relative h-[220px] w-full";
 const MAX_GAIT_CHART_POINTS = 25;
 
+/** Stability as 0–1 for charts/headline; some payloads use 0–100 (VisitDetails-style). */
+function gaitStabilityAsRatio(raw) {
+  if (raw == null) return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  if (n >= 0 && n <= 1) return n;
+  if (n > 1 && n <= 100) return n / 100;
+  return null;
+}
+
 function summarizeGaitWindows(windows, maxPoints = MAX_GAIT_CHART_POINTS) {
   if (!Array.isArray(windows) || windows.length <= maxPoints) return windows || [];
 
@@ -104,7 +114,7 @@ function summarizeGaitWindows(windows, maxPoints = MAX_GAIT_CHART_POINTS) {
       features: {
         speed_mps: mean(bucket.map((w) => w.features?.speed_mps)),
         symmetry: mean(bucket.map((w) => w.features?.symmetry)),
-        stability: mean(bucket.map((w) => w.features?.stability)),
+        stability: mean(bucket.map((w) => gaitStabilityAsRatio(w.features?.stability))),
       },
     });
   }
@@ -655,7 +665,26 @@ export default function ReportSummary() {
     let avgSpeed =
       summary?.features?.avg_speed_mps ?? summary?.features?.speed_mps ?? null;
     let avgSym = summary?.features?.avg_symmetry ?? summary?.features?.symmetry ?? null;
-    let avgStab = summary?.features?.avg_stability ?? summary?.features?.stability ?? null;
+    let avgStab = gaitStabilityAsRatio(
+      summary?.features?.avg_stability ?? summary?.features?.stability ?? null
+    );
+
+    const winStabRatios = windows
+      .map((w) => gaitStabilityAsRatio(w.features?.stability))
+      .filter((x) => x != null);
+    const meanWinStab = winStabRatios.length
+      ? winStabRatios.reduce((a, v) => a + v, 0) / winStabRatios.length
+      : null;
+
+    // Headline + PDF use the same metric as the gait chart: per-window stability when the
+    // visit summary RMS score is missing, ~zero, or disagrees with the time series (mixed metrics).
+    if (meanWinStab != null) {
+      if (avgStab == null) {
+        avgStab = meanWinStab;
+      } else if (avgStab < 0.005 && meanWinStab > 0.02) {
+        avgStab = meanWinStab;
+      }
+    }
 
     if (avgSpeed == null && windows.length) {
       const sp = windows.map((w) => w.features?.speed_mps).filter((x) => x != null);
@@ -665,10 +694,6 @@ export default function ReportSummary() {
       const sy = windows.map((w) => w.features?.symmetry).filter((x) => x != null);
       avgSym = sy.reduce((a, v) => a + v, 0) / sy.length;
     }
-    if (avgStab == null && windows.length) {
-      const st = windows.map((w) => w.features?.stability).filter((x) => x != null);
-      avgStab = st.reduce((a, v) => a + v, 0) / st.length;
-    }
 
     const gaitNotes = summary?.notes;
 
@@ -676,7 +701,7 @@ export default function ReportSummary() {
 
     const speedSeries = chartWindows.map((w) => w.features?.speed_mps ?? null);
     const symmetrySeries = chartWindows.map((w) => w.features?.symmetry ?? null);
-    const stabilitySeries = chartWindows.map((w) => w.features?.stability ?? null);
+    const stabilitySeries = chartWindows.map((w) => gaitStabilityAsRatio(w.features?.stability) ?? null);
 
     const speedSmoothed = smoothSeries(speedSeries, 1);
     const symmetrySmoothed = smoothSeries(symmetrySeries, 1);
